@@ -890,6 +890,7 @@ async def custom_tts_endpoint(
     perf_monitor.record("Parameters and voice path resolved")
 
     all_audio_segments_np: List[np.ndarray] = []
+    segment_is_pause: List[bool] = []  # Track which segments are explicit pauses
     final_output_sample_rate = (
         get_audio_sample_rate()
     )  # Target SR for the final output file
@@ -897,28 +898,66 @@ async def custom_tts_endpoint(
         None  # SR from the TTS engine (e.g., 24000 Hz)
     )
 
-    if request.split_text and len(request.text) > (
-        request.chunk_size * 1.5 if request.chunk_size else 120 * 1.5
-    ):
-        chunk_size_to_use = (
-            request.chunk_size if request.chunk_size is not None else 120
-        )
-        logger.info(f"Splitting text into chunks of size ~{chunk_size_to_use}.")
-        text_chunks = utils.chunk_text_by_sentences(request.text, chunk_size_to_use)
-        perf_monitor.record(f"Text split into {len(text_chunks)} chunks")
-    else:
-        text_chunks = [request.text]
-        logger.info(
-            "Processing text as a single chunk (splitting not enabled or text too short)."
-        )
+    # --- Parse pause tags from input text ---
+    pause_segments = utils.split_text_on_pause_tags(request.text)
+    has_pause_tags = any(seg["type"] == "pause" for seg in pause_segments)
 
-    if not text_chunks:
+    if has_pause_tags:
+        logger.info(f"Found pause tags in text. Split into {len(pause_segments)} segments.")
+
+    # Build the final list of work items: each is either a text chunk to synthesize
+    # or a pause (silence) to insert.
+    work_items = []  # List of dicts: {"type": "text", "content": str} or {"type": "pause", "duration_ms": int}
+
+    for seg in pause_segments:
+        if seg["type"] == "pause":
+            work_items.append(seg)
+        else:
+            # For text segments, apply chunking if enabled
+            seg_text = seg["content"]
+            if request.split_text and len(seg_text) > (
+                request.chunk_size * 1.5 if request.chunk_size else 120 * 1.5
+            ):
+                chunk_size_to_use = (
+                    request.chunk_size if request.chunk_size is not None else 120
+                )
+                text_chunks = utils.chunk_text_by_sentences(seg_text, chunk_size_to_use)
+                for tc in text_chunks:
+                    work_items.append({"type": "text", "content": tc})
+            else:
+                work_items.append({"type": "text", "content": seg_text})
+
+    text_work_items = [w for w in work_items if w["type"] == "text"]
+    if not text_work_items:
         raise HTTPException(
-            status_code=400, detail="Text processing resulted in no usable chunks."
+            status_code=400, detail="Text processing resulted in no usable text chunks."
         )
 
-    for i, chunk in enumerate(text_chunks):
-        logger.info(f"Synthesizing chunk {i+1}/{len(text_chunks)}...")
+    perf_monitor.record(f"Text processed into {len(work_items)} work items ({len(text_work_items)} text, {len(work_items) - len(text_work_items)} pauses)")
+
+    synth_index = 0
+    for i, item in enumerate(work_items):
+        if item["type"] == "pause":
+            # Insert silence directly as a numpy array
+            if engine_output_sample_rate is None:
+                # Use default sample rate if we haven't synthesized yet
+                pause_sr = 24000
+            else:
+                pause_sr = engine_output_sample_rate
+            silence_samples = int(item["duration_ms"] / 1000 * pause_sr)
+            silence_np = np.zeros(silence_samples, dtype=np.float32)
+            all_audio_segments_np.append(silence_np)
+            segment_is_pause.append(True)
+            logger.info(f"Inserted {item['duration_ms']}ms pause")
+            continue
+
+        chunk = item["content"]
+        # Skip chunks that are just punctuation/whitespace (e.g. lone em-dash from pause splitting)
+        if not chunk or len(chunk.strip()) < 2 or all(c in ' \t\n\r—–-.,;:!?' for c in chunk):
+            logger.info(f"Skipping trivial chunk: {repr(chunk)}")
+            continue
+        synth_index += 1
+        logger.info(f"Synthesizing chunk {synth_index}/{len(text_work_items)}...")
         try:
             chunk_audio_tensor, chunk_sr_from_engine = engine.synthesize(
                 text=chunk,
@@ -950,6 +989,10 @@ async def custom_tts_endpoint(
                     if request.language is not None
                     else get_gen_default_language()
                 ),
+                # Qwen3-specific params
+                speaker=getattr(request, 'qwen3_speaker', None),
+                instruct=getattr(request, 'qwen3_instruct', None),
+                ref_text=getattr(request, 'qwen3_ref_text', None),
             )
             perf_monitor.record(f"Engine synthesized chunk {i+1}")
 
@@ -974,18 +1017,31 @@ async def custom_tts_endpoint(
                 else get_gen_default_speed_factor()
             )
             if speed_factor_to_use != 1.0:
-                current_processed_audio_tensor, _ = utils.apply_speed_factor(
-                    current_processed_audio_tensor,
-                    chunk_sr_from_engine,
-                    speed_factor_to_use,
-                )
+                # For numpy arrays (Qwen3), apply speed via librosa directly
+                if isinstance(current_processed_audio_tensor, np.ndarray):
+                    audio_1d = current_processed_audio_tensor.squeeze()
+                    stretched = librosa.effects.time_stretch(
+                        y=audio_1d.astype(np.float32), rate=speed_factor_to_use
+                    )
+                    current_processed_audio_tensor = stretched
+                else:
+                    current_processed_audio_tensor, _ = utils.apply_speed_factor(
+                        current_processed_audio_tensor,
+                        chunk_sr_from_engine,
+                        speed_factor_to_use,
+                    )
                 perf_monitor.record(f"Speed factor applied to chunk {i+1}")
 
             # ### MODIFICATION ###
             # All other processing is REMOVED from the loop.
             # We will process the final concatenated audio clip.
-            processed_audio_np = current_processed_audio_tensor.cpu().numpy().squeeze()
+            # Handle both torch.Tensor (Chatterbox) and numpy.ndarray (Qwen3)
+            if isinstance(current_processed_audio_tensor, np.ndarray):
+                processed_audio_np = current_processed_audio_tensor.squeeze()
+            else:
+                processed_audio_np = current_processed_audio_tensor.cpu().numpy().squeeze()
             all_audio_segments_np.append(processed_audio_np)
+            segment_is_pause.append(False)
 
         except HTTPException as http_exc:
             raise http_exc
@@ -1008,7 +1064,7 @@ async def custom_tts_endpoint(
     try:
         # ### SMART AUDIO STITCHING ###
         # Local constants - adjust these values to tune stitching behavior
-        SENTENCE_PAUSE_MS = 200  # Desired audible silence between sentences
+        SENTENCE_PAUSE_MS = 800  # Desired audible silence between sentences
         CROSSFADE_MS = 20  # Crossfade duration for smart mode (10-50ms recommended)
         SAFETY_FADE_MS = 3  # Minimal edge fade for fallback mode (2-5ms)
         ENABLE_DC_REMOVAL = False  # Set True if you hear low-frequency thumps
@@ -1064,14 +1120,18 @@ async def custom_tts_endpoint(
 
             # Stitch remaining chunks with crossfaded silence gaps
             for i in range(1, len(chunks)):
-                # Create silence buffer (oversized to compensate for crossfade overlap)
-                silence = np.zeros(silence_buffer_samples, dtype=np.float32)
+                # Skip adding extra silence if current or previous segment is an explicit pause
+                prev_is_pause = segment_is_pause[i - 1] if i - 1 < len(segment_is_pause) else False
+                curr_is_pause = segment_is_pause[i] if i < len(segment_is_pause) else False
 
-                # Crossfade: current result → silence (speech fades into silence)
-                result = _crossfade_with_overlap(result, silence, fade_samples)
-
-                # Crossfade: result → next chunk (silence fades into speech)
-                result = _crossfade_with_overlap(result, chunks[i], fade_samples)
+                if prev_is_pause or curr_is_pause:
+                    # Explicit pause segment — just concatenate directly, no extra silence
+                    result = np.concatenate([result, chunks[i]])
+                else:
+                    # Normal text-to-text transition — add silence gap with crossfade
+                    silence = np.zeros(silence_buffer_samples, dtype=np.float32)
+                    result = _crossfade_with_overlap(result, silence, fade_samples)
+                    result = _crossfade_with_overlap(result, chunks[i], fade_samples)
 
             final_audio_np = result
             logger.info(

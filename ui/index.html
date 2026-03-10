@@ -66,6 +66,9 @@
                                             <option value="chatterbox-turbo">Chatterbox Turbo (Fast, English)</option>
                                             <option value="chatterbox">Chatterbox Original (English)</option>
                                             <option value="chatterbox-multilingual">Chatterbox Multilingual (23 Languages)</option>
+                                            <option value="qwen3-tts-base">Qwen3-TTS Base (Voice Cloning, 10 Languages)</option>
+                                            <option value="qwen3-tts-custom">Qwen3-TTS Custom (Preset Speakers)</option>
+                                            <option value="qwen3-tts-base-lite">Qwen3-TTS Base Lite (0.6B)</option>
                                         </select>
                                     </div>
                                     <div id="model-status" class="model-status">
@@ -87,7 +90,7 @@
                                 <label for="text" class="form-label">Text to synthesize</label>
                                 <p class="form-hint mb-2">
                                     Enter the text you want to convert to speech. For audiobooks, you can paste long
-                                    chapters.
+                                    chapters. Use <code>[pause:1.5s]</code> to insert custom pauses between phrases.
                                 </p>
                                 <div class="textarea-wrapper">
                                     <textarea name="text" id="text" rows="8" class="form-textarea"
@@ -314,6 +317,39 @@
                                                 <option value="tr">Turkish (Türkçe)</option>
                                             </select>
                                         </div>
+                                        <!-- Qwen3-TTS specific controls -->
+                                        <div id="qwen3-speaker-container" class="form-group hidden">
+                                            <label for="qwen3-speaker" class="form-label">Speaker (Qwen3)</label>
+                                            <select id="qwen3-speaker" name="qwen3_speaker" class="form-select narrow">
+                                                <option value="Chelsie">Chelsie (Female, English)</option>
+                                                <option value="Ryan">Ryan (Male, English)</option>
+                                                <option value="Aiden">Aiden (Male, English)</option>
+                                                <option value="Ethan">Ethan (Male, English)</option>
+                                                <option value="Vivian">Vivian (Female, Chinese)</option>
+                                                <option value="Serena">Serena (Female, Chinese)</option>
+                                                <option value="Uncle_Fu">Uncle Fu (Male, Chinese)</option>
+                                                <option value="Dylan">Dylan (Male, Beijing Chinese)</option>
+                                                <option value="Eric">Eric (Male, Sichuan Chinese)</option>
+                                                <option value="Ono_Anna">Ono Anna (Female, Japanese)</option>
+                                                <option value="Sohee">Sohee (Female, Korean)</option>
+                                            </select>
+                                            <p class="form-hint">Preset speaker for Qwen3 CustomVoice model.</p>
+                                        </div>
+                                        <div id="qwen3-instruct-container" class="form-group hidden">
+                                            <label for="qwen3-instruct" class="form-label">Style Instruction (Qwen3)</label>
+                                            <input type="text" id="qwen3-instruct" name="qwen3_instruct"
+                                                class="form-input" placeholder="e.g., Happy and excited, Calm and soothing"
+                                                value="">
+                                            <p class="form-hint">Emotion or style instruction for the speaker.</p>
+                                        </div>
+                                        <div id="qwen3-ref-text-container" class="form-group hidden">
+                                            <label for="qwen3-ref-text" class="form-label">Reference Audio Transcript</label>
+                                            <textarea id="qwen3-ref-text" name="qwen3_ref_text" rows="2"
+                                                class="form-textarea"
+                                                placeholder="Type the exact words spoken in the reference audio..."></textarea>
+                                            <p class="form-hint">Required for Qwen3 voice cloning. The transcript of your reference audio.</p>
+                                        </div>
+
                                         <div class="form-group">
                                             <label for="output-format" class="form-label">Output Format</label>
                                             <select id="output-format" name="output_format" class="form-select narrow">

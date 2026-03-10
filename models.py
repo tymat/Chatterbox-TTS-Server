@@ -94,6 +94,17 @@ class CustomTTSRequest(BaseModel):
         None, description="Overrides default language if provided."
     )
 
+    # Qwen3-TTS specific parameters
+    qwen3_speaker: Optional[str] = Field(
+        None, description="Speaker name for Qwen3 CustomVoice model."
+    )
+    qwen3_instruct: Optional[str] = Field(
+        None, description="Style/emotion instruction for Qwen3 models."
+    )
+    qwen3_ref_text: Optional[str] = Field(
+        None, description="Transcript of reference audio for Qwen3 voice cloning."
+    )
+
 
 class ErrorResponse(BaseModel):
     """Standard error response model for API errors."""

@@ -63,6 +63,19 @@ document.addEventListener('DOMContentLoaded', async function () {
     const LANGUAGES_ENGLISH_ONLY = [
         { code: 'en', name: 'English' }
     ];
+    const LANGUAGES_QWEN3 = [
+        { code: 'auto', name: 'Auto-detect' },
+        { code: 'en', name: 'English' },
+        { code: 'zh', name: 'Chinese (中文)' },
+        { code: 'ja', name: 'Japanese (日本語)' },
+        { code: 'ko', name: 'Korean (한국어)' },
+        { code: 'de', name: 'German (Deutsch)' },
+        { code: 'fr', name: 'French (Français)' },
+        { code: 'ru', name: 'Russian (Русский)' },
+        { code: 'pt', name: 'Portuguese (Português)' },
+        { code: 'es', name: 'Spanish (Español)' },
+        { code: 'it', name: 'Italian (Italiano)' }
+    ];
 
     // --- DOM Element Selectors ---
     const appTitleLink = document.getElementById('app-title-link');
@@ -104,6 +117,12 @@ document.addEventListener('DOMContentLoaded', async function () {
     const seedInput = document.getElementById('seed');
     const languageSelectContainer = document.getElementById('language-select-container');
     const languageSelect = document.getElementById('language');
+    const qwen3SpeakerContainer = document.getElementById('qwen3-speaker-container');
+    const qwen3SpeakerSelect = document.getElementById('qwen3-speaker');
+    const qwen3InstructContainer = document.getElementById('qwen3-instruct-container');
+    const qwen3InstructInput = document.getElementById('qwen3-instruct');
+    const qwen3RefTextContainer = document.getElementById('qwen3-ref-text-container');
+    const qwen3RefTextInput = document.getElementById('qwen3-ref-text');
     const outputFormatSelect = document.getElementById('output-format');
     const saveGenDefaultsBtn = document.getElementById('save-gen-defaults-btn');
     const genDefaultsStatus = document.getElementById('gen-defaults-status');
@@ -308,6 +327,8 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         currentModelInfo = modelInfo;
 
+        const isQwen3 = modelInfo.type === 'qwen3';
+
         // Update model indicator badge
         if (modelIndicator && modelBadge) {
             modelIndicator.classList.remove('hidden');
@@ -319,6 +340,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             } else if (modelInfo.type === 'multilingual') {
                 modelBadge.className = 'model-badge multilingual';
                 modelBadgeText.textContent = '🌍 Multilingual';
+            } else if (isQwen3) {
+                modelBadge.className = 'model-badge multilingual';
+                modelBadgeText.textContent = '🧠 Qwen3-TTS';
             } else {
                 modelBadge.className = 'model-badge original';
                 modelBadgeText.textContent = 'Original';
@@ -345,6 +369,14 @@ document.addEventListener('DOMContentLoaded', async function () {
                 selectorValue = 'chatterbox-turbo';
             } else if (modelInfo.type === 'multilingual') {
                 selectorValue = 'chatterbox-multilingual';
+            } else if (isQwen3 && modelInfo.qwen3_model_variant) {
+                // Map variant back to selector value
+                const variantMap = {
+                    'base': 'qwen3-tts-base',
+                    'custom': 'qwen3-tts-custom',
+                    'voice_design': 'qwen3-tts-voice-design',
+                };
+                selectorValue = variantMap[modelInfo.qwen3_model_variant] || 'qwen3-tts-base';
             }
             modelSelect.value = selectorValue;
             selectedModelSelector = selectorValue;
@@ -363,13 +395,27 @@ document.addEventListener('DOMContentLoaded', async function () {
             }
         }
 
-        // Hide exaggeration and CFG for turbo model
-        if (modelInfo.type === 'turbo') {
+        // Hide exaggeration and CFG for turbo and qwen3 models
+        if (modelInfo.type === 'turbo' || isQwen3) {
             exaggerationGroup?.classList.add('hidden');
             cfgWeightGroup?.classList.add('hidden');
         } else {
             exaggerationGroup?.classList.remove('hidden');
             cfgWeightGroup?.classList.remove('hidden');
+        }
+
+        // Show/hide Qwen3-specific controls
+        const isQwen3Custom = isQwen3 && modelInfo.qwen3_model_variant === 'custom';
+        const isQwen3Base = isQwen3 && modelInfo.qwen3_model_variant === 'base';
+
+        if (qwen3SpeakerContainer) {
+            qwen3SpeakerContainer.classList.toggle('hidden', !isQwen3Custom);
+        }
+        if (qwen3InstructContainer) {
+            qwen3InstructContainer.classList.toggle('hidden', !isQwen3);
+        }
+        if (qwen3RefTextContainer) {
+            qwen3RefTextContainer.classList.toggle('hidden', !isQwen3Base);
         }
 
         // Refresh presets to filter based on current model type
@@ -386,16 +432,24 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         const currentValue = languageSelect.value;
         const isMultilingual = modelType === 'multilingual';
-        const languages = isMultilingual ? LANGUAGES_MULTILINGUAL : LANGUAGES_ENGLISH_ONLY;
+        const isQwen3 = modelType === 'qwen3';
+        const showLanguages = isMultilingual || isQwen3;
+        let languages;
+        if (isQwen3) {
+            languages = LANGUAGES_QWEN3;
+        } else if (isMultilingual) {
+            languages = LANGUAGES_MULTILINGUAL;
+        } else {
+            languages = LANGUAGES_ENGLISH_ONLY;
+        }
 
-        // Save current selection before switching away from Multilingual
-        if (!isMultilingual && currentValue && currentValue !== 'en') {
+        // Save current selection before switching away from Multilingual/Qwen3
+        if (!showLanguages && currentValue && currentValue !== 'en') {
             lastMultilingualLanguage = currentValue;
         }
 
         // Show/hide language selector based on model type
-        // Only show for multilingual model (or if config says to show it)
-        if (isMultilingual) {
+        if (showLanguages) {
             languageSelectContainer.classList.remove('hidden');
         } else {
             languageSelectContainer.classList.add('hidden');
@@ -1068,6 +1122,18 @@ document.addEventListener('DOMContentLoaded', async function () {
             jsonData.predefined_voice_id = predefinedVoiceSelect.value;
         } else if (currentVoiceMode === 'clone' && cloneReferenceSelect.value !== 'none') {
             jsonData.reference_audio_filename = cloneReferenceSelect.value;
+        }
+        // Qwen3-specific parameters
+        if (currentModelInfo && currentModelInfo.type === 'qwen3') {
+            if (qwen3SpeakerSelect && !qwen3SpeakerContainer.classList.contains('hidden')) {
+                jsonData.qwen3_speaker = qwen3SpeakerSelect.value;
+            }
+            if (qwen3InstructInput && qwen3InstructInput.value.trim()) {
+                jsonData.qwen3_instruct = qwen3InstructInput.value.trim();
+            }
+            if (qwen3RefTextInput && qwen3RefTextInput.value.trim()) {
+                jsonData.qwen3_ref_text = qwen3RefTextInput.value.trim();
+            }
         }
         return jsonData;
     }

@@ -9,19 +9,19 @@ server:
   log_file_max_size_mb: 10
   log_file_backup_count: 5
 model:
-  repo_id: chatterbox-turbo
+  repo_id: qwen3-tts-base
 tts_engine:
-  device: cuda
+  device: mps
   predefined_voices_path: voices
   reference_audio_path: reference_audio
-  default_voice_id: Emily.wav
+  default_voice_id: AnthonyE.wav
 paths:
   model_cache: model_cache
   output: outputs
 generation_defaults:
-  temperature: 0.8
-  exaggeration: 1.3
-  cfg_weight: 0.5
+  temperature: 0.67
+  exaggeration: 1.49
+  cfg_weight: 0.6
   seed: 0
   speed_factor: 1.0
   language: en
@@ -31,34 +31,79 @@ audio_output:
   max_reference_duration_sec: 30
   save_to_disk: false
 ui_state:
-  last_text: '[gasp] Okay, we have fifteen minutes left! Fifteen minutes! [groan]
-    How have we been in here for forty-five minutes and only solved two puzzles?!
-    [clear throat] Let''s think logically. [sniff] This room smells like fear and
-    bad decisions. [cough] And also someone''s very strong cologne, Kevin. [sigh]
-    Okay, the clue says "the answer lies where time stands still." [chuckle] Great,
-    very helpful, very straightforward. [shush] Everyone stop talking for one second!
-    [gasp] Wait, the clock on the wall! It''s stuck at three fifteen! [laugh] That''s
-    it! That has to be it! [groan] It''s not the combination. Of course it''s not
-    the combination. [sniff] Why would anything in this room be logical? [sigh] Has
-    anyone checked under the carpet? [gasp] There''s a hidden compartment! [chuckle]
-    Kevin, you''re standing on a clue! Classic Kevin! [clear throat] Okay, it''s another
-    riddle. "What has keys but no locks, space but no room, and you can enter but
-    can''t go inside?" [groan] Who writes these things?! [cough] A keyboard! It''s
-    a keyboard! [laugh] There''s a keyboard painted on the wall! [gasp] Eight minutes!
-    We have eight minutes! [sigh] If we don''t escape this room, we''re never speaking
-    of this again. [shush] Focus, everyone! [chuckle] We''re so close I can taste
-    freedom! [sniff] That or more of Kevin''s cologne!
-
-    '
-  last_voice_mode: predefined
+  last_text: "More insistently than all other religious systems on Earth, the Western\
+    \ systems insist on appointing an end to their world. [pause:0.6s]\nThe cyclical\
+    \ worlds of Hinduism are cycles of time so vast that they lose all force on the\
+    \ popular imagination. [pause:0.4s]\nWhat uniquely distinguishes Judaism, Christianity,\
+    \ and Islam is the insistence that God will appear tangential to history, in a\
+    \ way that will create a last\u2011days scenario. [pause:0.6s]\n\nThis scenario\
+    \ will involve a great uptaking of souls into the mystery of God. [pause:0.4s]\n\
+    This idea, called apocalyptic in its more catastrophic version, and millenarian\
+    \ in its more pastoral version, is a necessary correlative to the concept of Eden\
+    \ and the unique moment of humanity\u2019s creation by God. [pause:0.6s]\nIf human\
+    \ creation occurred at a unique moment in the history of the universe, then presumably,\
+    \ after the expiation of the sin of Eden, God will gather humans once again into\
+    \ the mystery. [pause:0.8s]\n\nWhen encountered outside the religious framework,\
+    \ the apocalyptic expectation of imminent transformation of the environment, with\
+    \ the individual somehow playing a central role, is labeled pathology. [pause:0.4s]\n\
+    This pathological symptom in individuals is the driving force behind much of our\
+    \ civilization. [pause:0.4s]\nSome years ago, the secretary of the interior was\
+    \ asked why he wasn\u2019t saving more of America\u2019s forests. [pause:0.4s]\n\
+    He replied that he saw no reason to save the forests since Jesus was coming, and\
+    \ the end of the world was imminent. [pause:1.0s]\n\nWhat is this intuition about\
+    \ the end of the world? [pause:0.6s]\nNow that we\u2019re beginning to gather\
+    \ more data, science is beginning to pay back on promises made in the eighteenth\
+    \ century, to give us a complete and deep description of the physical and astronomical\
+    \ universe. [pause:0.6s]\nWhat we\u2019re seeing in this description is a highly\
+    \ chaotic domain. [pause:0.6s]\nThere isn\u2019t a stable body in the Solar System\
+    \ that isn\u2019t deeply pockmarked with asteroidal impact. [pause:0.4s]\nFrom\
+    \ the inner planets to the moons of the gas giants, there is tremendous visual\
+    \ evidence of catastrophic episodes throughout the Solar System\u2019s history.\
+    \ [pause:0.8s]\n\nIf God or a supertransmundane event were to enter the ordinary\
+    \ biological and evolutionary history of a planet, there might be some kind of\
+    \ shock wave of anticipation, a sense of disruption in ordinary events before\
+    \ the big event was, in fact, imminent. [pause:0.8s]\nThe brief period we\u2019\
+    ve experienced over the past twenty thousand years seems to be within such an\
+    \ aura of anticipation. [pause:0.6s]\nIf we could strip the provincialism from\
+    \ the messages of the apocalyptic religions, we would find they carry a deep intuition\
+    \ about the inherent instability of the cosmos. [pause:0.8s]\nI think they are\
+    \ trying to extract something out of the human future that may, in fact, involve\
+    \ the survival of the planet. [pause:0.6s]\nShamans, mystics, and psychedelic\
+    \ travelers may be receiving a very noisy, low\u2011grade signal about a future\
+    \ event that is somehow built into the structure of space and time. [pause:1.0s]\n\
+    \nPerhaps we are somehow witnesses to a major phase transition in the career of\
+    \ self\u2011reflecting bios in the universe. [pause:0.6s]\nIt may not be the end\
+    \ of the world, but rather a complete systemic reorganization on the scale of\
+    \ the metamorphosis that occurs in butterflies. [pause:0.4s]\nA complete meltdown\
+    \ of the previous world system, followed by a recasting at the behest of a higher\
+    \ Gaian mind, or the world soul. [pause:1.0s]\n\nLife has a terrifying tenaciousness.\
+    \ [pause:0.4s]\nIt seized hold of this planet three\u2011and\u2011a\u2011half\
+    \ billion years ago and has managed it through hellfire. [pause:0.6s]\nIt has\
+    \ again and again brought the planet into stable equilibria supportive of biology.\
+    \ [pause:0.4s]\nThere have been asteroid infalls and continents ground to dust,\
+    \ and still, life has kept hold of its chunk of ground. [pause:0.6s]\nPerhaps\
+    \ the recent advent of human intelligence signals a crisis of greater magnitude.\
+    \ [pause:0.6s]\nThe presence of our minds may indicate that we are very near some\
+    \ sort of enormous, concrescing singularity. [pause:1.0s]\n\nWe are experiencing\
+    \ more than calendrical pressure from the approach of the third millennium. [pause:0.6s]\n\
+    Concrescence appears in graphs of resources, population density, demand for hydroelectric\
+    \ energy, and levels of strontium\u2011ninety in milk. [pause:0.6s]\nWho can look\
+    \ at all this data and not see either the yawning grave of humanity, or a complete\
+    \ system reversal? [pause:0.8s]\nI think we\u2019re standing on the cusp of a\
+    \ hyperdimensional event of some sort, toward which all of history is being poured\
+    \ at a great rate. [pause:0.6s]\nIt\u2019s seeping into our religions, our politics,\
+    \ our dreams, and into the general imagination. [pause:0.8s]\n\nWe have the peculiar\
+    \ good fortune of fulfilling the wish conveyed in the Irish toast... \u201CMay\
+    \ you be alive at the end of the world.\u201D [pause:1.8s]"
+  last_voice_mode: clone
   last_predefined_voice: Emily.wav
-  last_reference_file: Gianna.wav
-  last_seed: 3000
-  last_chunk_size: 240
+  last_reference_file: TerenceMckenna2.wav
+  last_seed: 1
+  last_chunk_size: 190
   last_split_text_enabled: true
   hide_chunk_warning: false
-  hide_generation_warning: false
-  theme: light
+  hide_generation_warning: true
+  theme: dark
   last_preset_name: "\u26A1 Turbo: Escape Room Panic"
 ui:
   title: Chatterbox TTS Server

@@ -9,7 +9,13 @@ import shutil
 from copy import deepcopy
 from threading import Lock
 from typing import Dict, Any, Optional, List, Tuple
-import torch  # For automatic CUDA/CPU device detection
+# Defensive PyTorch import - not needed for MLX-based engines
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
 from pathlib import Path
 
 # Standard logger setup
@@ -235,6 +241,10 @@ class YamlConfigManager:
         Returns:
             str: 'cuda' if CUDA is truly functional, 'mps' if MPS is functional, 'cpu' otherwise.
         """
+        if not TORCH_AVAILABLE:
+            logger.info("PyTorch not available. Using CPU (or MLX for Qwen3).")
+            return "cpu"
+
         # Test CUDA first as it's generally preferred for ML workloads
         if torch.cuda.is_available():
             try:

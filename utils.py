@@ -15,8 +15,16 @@ from pydub import AudioSegment
 
 import numpy as np
 import soundfile as sf
-import torchaudio  # For saving PyTorch tensors and potentially speed adjustment.
-import torch
+
+# Defensive PyTorch imports - not needed for MLX-based engines
+try:
+    import torchaudio
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torchaudio = None
+    torch = None
+    TORCH_AVAILABLE = False
 
 # Configuration manager to get paths dynamically.
 # Assumes config.py and its config_manager are in the same directory or accessible via PYTHONPATH.
@@ -428,7 +436,7 @@ def save_audio_to_file(
 
 
 def save_audio_tensor_to_file(
-    audio_tensor: torch.Tensor,
+    audio_tensor,  # torch.Tensor
     sample_rate: int,
     file_path_str: str,
     output_format: str = "wav",
@@ -474,8 +482,8 @@ def save_audio_tensor_to_file(
 
 # --- Audio Manipulation Utilities ---
 def apply_speed_factor(
-    audio_tensor: torch.Tensor, sample_rate: int, speed_factor: float
-) -> Tuple[torch.Tensor, int]:
+    audio_tensor, sample_rate: int, speed_factor: float  # audio_tensor: torch.Tensor
+):  # -> Tuple[torch.Tensor, int]
     """
     Applies a speed factor to an audio tensor.
     Uses librosa.effects.time_stretch if available for pitch preservation.
@@ -1016,6 +1024,62 @@ def _preprocess_and_segment_text(full_text: str) -> List[Tuple[Optional[str], st
         f"Preprocessed text into {len(segmented_with_tags)} segments/sentences."
     )
     return segmented_with_tags
+
+
+# --- Pause Tag Parsing ---
+# Regex to match [pause:Xs] or [pause:X.Xs] tags (case-insensitive)
+PAUSE_TAG_PATTERN = re.compile(
+    r'\[pause[:\s]+(\d+(?:\.\d+)?)\s*s?\]',
+    re.IGNORECASE
+)
+
+
+def split_text_on_pause_tags(text: str) -> List[dict]:
+    """
+    Splits text on [pause:Xs] tags and returns a list of segments.
+
+    Each segment is a dict with:
+      - "type": "text" or "pause"
+      - "content": the text string (for text segments)
+      - "duration_ms": pause duration in milliseconds (for pause segments)
+
+    Supported tag formats:
+      [pause:1s]  [pause:0.5s]  [pause:1.5]  [pause: 2s]
+      [Pause:1s]  [PAUSE:1s]
+
+    Args:
+        text: Input text possibly containing pause tags.
+
+    Returns:
+        List of segment dicts.
+    """
+    segments = []
+    last_end = 0
+
+    for match in PAUSE_TAG_PATTERN.finditer(text):
+        # Add text before this pause tag
+        before_text = text[last_end:match.start()].strip()
+        if before_text:
+            segments.append({"type": "text", "content": before_text})
+
+        # Add the pause segment
+        duration_sec = float(match.group(1))
+        duration_ms = int(duration_sec * 1000)
+        segments.append({"type": "pause", "duration_ms": duration_ms})
+        logger.debug(f"Found pause tag: {match.group(0)} -> {duration_ms}ms")
+
+        last_end = match.end()
+
+    # Add any remaining text after the last pause tag
+    remaining = text[last_end:].strip()
+    if remaining:
+        segments.append({"type": "text", "content": remaining})
+
+    # If no pause tags found, return the whole text as a single segment
+    if not segments:
+        segments.append({"type": "text", "content": text})
+
+    return segments
 
 
 def chunk_text_by_sentences(
