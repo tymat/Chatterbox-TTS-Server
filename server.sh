@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-source chatterbox/bin/activate
+source qwen3/bin/activate
 python server.py --upgrade
 
 

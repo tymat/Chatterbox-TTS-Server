@@ -1,6 +1,8 @@
 # Ignore Python cache and compiled files
 *.pyc
 *.pyo
+qwen3
+chatterbox
 *.pyd
 __pycache__/
 .ipynb_checkpoints/
