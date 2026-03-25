@@ -19,71 +19,30 @@ paths:
   model_cache: model_cache
   output: outputs
 generation_defaults:
-  temperature: 0.67
+  temperature: 0.44
   exaggeration: 1.49
   cfg_weight: 0.6
   seed: 1
   speed_factor: 1
-  language: en
+  language: zh
 audio_output:
   format: wav
-  sample_rate: 24000
+  sample_rate: 22050
   max_reference_duration_sec: 30
   save_to_disk: false
 ui_state:
-  last_text: "The notion that the universe is a simulation is a modern myth born from\
-    \ humanity\u2019s tendency to project its own tools and metaphors onto reality.\
-    \ In previous centuries, people imagined a cosmos shaped by gods or by a celestial\
-    \ clockmaker. Today, surrounded by computers, we imagine the universe as a vast\
-    \ program. This is not a discovery about the cosmos but a reflection of our cultural\
-    \ moment. The idea rests on a fundamental confusion between description and creation.\
-    \ Deterministic physical laws do not imply computation; they simply describe lawful\
-    \ continuity. When physicists write equations to describe motion or energy, they\
-    \ are constructing models, not engines. To claim that the universe runs on mathematics\
-    \ is to mistake the success of our representations for the mechanism of reality\
-    \ itself.  \n\nThe fantasy of simulation revives an older delusion: Laplace\u2019\
-    s Demon, the intellect that could predict all future events given all initial\
-    \ conditions. Even this, however, is physically impossible. To simulate the entire\
-    \ universe would require at least as much information and energy as the universe\
-    \ contains, which makes the simulation indistinguishable from the thing it seeks\
-    \ to represent. Determinism only reveals causality; it does not make the universe\
-    \ computable. Simulating every particle and every degree of freedom would demand\
-    \ an impossible amount of energy, violating thermodynamic limits such as Landauer\u2019\
-    s principle. A system cannot fully model itself while remaining smaller than itself,\
-    \ which means that the idea of a complete cosmic simulation collapses under its\
-    \ own requirements.  \n\nDespite these impossibilities, the idea persists because\
-    \ it feels intuitive in an age dominated by digital media. We describe minds,\
-    \ cells, and even societies as \u201Cprograms,\u201D and then assume reality itself\
-    \ works the same way. The simulation argument flatters our sense of significance\
-    \ by replacing a vanished deity with an intelligent designer who codes rather\
-    \ than creates. Yet this is not science; it is existential psychology draped in\
-    \ technological language. Digital physics, which proposes that the universe is\
-    \ made of information, is not evidence of simulation but a metaphor for our modes\
-    \ of modeling. Information, data, and computation describe how we organize knowledge,\
-    \ not how being itself is structured.  \n\nEmpirically, the simulation hypothesis\
-    \ offers nothing new. It predicts nothing, refines no theory, and provides no\
-    \ experimental distinction between a simulated and a natural cosmos. A proposal\
-    \ that cannot be tested is not physics but metaphysics. Determinism does not require\
-    \ supervision. The universe unfolds autonomously, governed by its own lawful regularities,\
-    \ not by the logic of a higher computer. When people say reality feels simulated,\
-    \ they are really expressing wonder at its coherence. Recognizing that coherence\
-    \ should lead to humility rather than paranoia. The truth is simple: the universe\
-    \ does not run; it exists. Computation models parts of it, but the totality defies\
-    \ simulation. The simulation idea is a philosophical error disguised as technological\
-    \ insight. Reality, self-consistent and sublime, needs no coder, no server, and\
-    \ no designer. Determinism is not computation, equations are not engines, and\
-    \ the cosmos is not software. Our metaphors change with history, yet reality remains\
-    \ beyond them."
+  last_text: "\u5988 [pause:1.0s]\n\u9EBB [pause:1.0s]\n\u9A6C [pause:1.0s]\n\u9A82\
+    \ [pause:1.0s]\n\u5417 [pause:1.0s]"
   last_voice_mode: clone
   last_predefined_voice: Emily.wav
-  last_reference_file: ACE.wav
+  last_reference_file: ACE2.wav
   last_seed: 0
-  last_chunk_size: 290
+  last_chunk_size: 480
   last_split_text_enabled: true
   hide_chunk_warning: false
   hide_generation_warning: true
   theme: dark
-  last_preset_name: Motivational Speech
+  last_preset_name: Noir Detective Monologue
 ui:
   title: Chatterbox TTS Server
   show_language_select: true

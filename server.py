@@ -953,7 +953,7 @@ async def custom_tts_endpoint(
 
         chunk = item["content"]
         # Skip chunks that are just punctuation/whitespace (e.g. lone em-dash from pause splitting)
-        if not chunk or len(chunk.strip()) < 2 or all(c in ' \t\n\r—–-.,;:!?' for c in chunk):
+        if not chunk or not chunk.strip() or all(c in ' \t\n\r—–-.,;:!?\u3000' for c in chunk):
             logger.info(f"Skipping trivial chunk: {repr(chunk)}")
             continue
         synth_index += 1
