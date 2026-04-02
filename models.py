@@ -1,7 +1,7 @@
 # File: models.py
 # Pydantic models for API request and response validation.
 
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from pydantic import BaseModel, Field
 
 
@@ -104,6 +104,59 @@ class CustomTTSRequest(BaseModel):
     qwen3_ref_text: Optional[str] = Field(
         None, description="Transcript of reference audio for Qwen3 voice cloning."
     )
+
+
+class BatchTTSRequest(BaseModel):
+    """Request model for batch/chapter TTS generation."""
+
+    text: str = Field(..., min_length=1, description="Full text to split into chapters.")
+    separator: str = Field(
+        "\n\n",
+        description="Chapter separator: '\\n\\n' (paragraphs), '---' (horizontal rule), '[chapter:Title]' (markers)."
+    )
+
+    voice_mode: Literal["predefined", "clone"] = Field(
+        "predefined", description="Voice mode for all chapters."
+    )
+    predefined_voice_id: Optional[str] = Field(None)
+    reference_audio_filename: Optional[str] = Field(None)
+    output_format: Optional[Literal["wav", "opus", "mp3"]] = Field("wav")
+    split_text: Optional[bool] = Field(True)
+    chunk_size: Optional[int] = Field(120, ge=50, le=500)
+
+    temperature: Optional[float] = Field(None)
+    exaggeration: Optional[float] = Field(None)
+    cfg_weight: Optional[float] = Field(None)
+    seed: Optional[int] = Field(None)
+    speed_factor: Optional[float] = Field(None)
+    language: Optional[str] = Field(None)
+
+    qwen3_speaker: Optional[str] = Field(None)
+    qwen3_instruct: Optional[str] = Field(None)
+    qwen3_ref_text: Optional[str] = Field(None)
+
+
+class BatchChapterStatus(BaseModel):
+    """Status of a single chapter in a batch."""
+    index: int
+    title: str
+    status: str  # "pending" | "generating" | "completed" | "failed"
+    filename: Optional[str] = None
+    download_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class BatchStatusResponse(BaseModel):
+    """Response model for batch job status."""
+    batch_id: str
+    status: str  # "queued" | "generating" | "completed" | "failed" | "partial"
+    total_chapters: int
+    completed_chapters: int
+    current_chapter: Optional[int] = None
+    chapters: List[BatchChapterStatus] = []
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):

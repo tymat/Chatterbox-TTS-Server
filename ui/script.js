@@ -28,6 +28,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     let hideGenerationWarning = false;
     let currentVoiceMode = 'predefined';
 
+    // Batch mode state
+    let isBatchMode = false;
+    let currentBatchId = null;
+    let batchPollInterval = null;
+
     const IS_LOCAL_FILE = window.location.protocol === 'file:';
     // If you always access the server via localhost
     const API_BASE_URL = IS_LOCAL_FILE ? 'http://localhost:8004' : '';
@@ -124,6 +129,12 @@ document.addEventListener('DOMContentLoaded', async function () {
     const qwen3RefTextContainer = document.getElementById('qwen3-ref-text-container');
     const qwen3RefTextInput = document.getElementById('qwen3-ref-text');
     const outputFormatSelect = document.getElementById('output-format');
+    // Batch mode DOM elements
+    const batchModeToggle = document.getElementById('batch-mode-toggle');
+    const batchControls = document.getElementById('batch-controls');
+    const batchProgressBar = document.getElementById('batch-progress-bar');
+    const batchProgressText = document.getElementById('batch-progress-text');
+    const batchDownloadZipBtn = document.getElementById('batch-download-zip-btn');
     const saveGenDefaultsBtn = document.getElementById('save-gen-defaults-btn');
     const genDefaultsStatus = document.getElementById('gen-defaults-status');
     const serverConfigForm = document.getElementById('server-config-form');
@@ -279,6 +290,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             hide_generation_warning: hideGenerationWarning,
             theme: localStorage.getItem('uiTheme') || 'dark',
             last_preset_name: currentPresetName,
+            last_qwen3_ref_text: qwen3RefTextInput ? qwen3RefTextInput.value : '',
+            last_qwen3_instruct: qwen3InstructInput ? qwen3InstructInput.value : '',
+            last_qwen3_speaker: qwen3SpeakerSelect ? qwen3SpeakerSelect.value : '',
         };
 
         try {
@@ -725,6 +739,11 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         if (chunkSizeSlider && currentUiState.last_chunk_size !== undefined) chunkSizeSlider.value = currentUiState.last_chunk_size;
         if (chunkSizeValue) chunkSizeValue.textContent = chunkSizeSlider ? chunkSizeSlider.value : '120';
+
+        // Restore Qwen3-specific state
+        if (qwen3RefTextInput && currentUiState.last_qwen3_ref_text) qwen3RefTextInput.value = currentUiState.last_qwen3_ref_text;
+        if (qwen3InstructInput && currentUiState.last_qwen3_instruct) qwen3InstructInput.value = currentUiState.last_qwen3_instruct;
+        if (qwen3SpeakerSelect && currentUiState.last_qwen3_speaker) qwen3SpeakerSelect.value = currentUiState.last_qwen3_speaker;
         toggleChunkControlsVisibility();
 
         const genDefaults = currentConfig.generation_defaults || {};
@@ -1144,11 +1163,15 @@ document.addEventListener('DOMContentLoaded', async function () {
         const startTime = performance.now();
         const jsonData = getTTSFormData();
         try {
+            const controller = new AbortController();
+            const fetchTimeout = setTimeout(() => controller.abort(), 8 * 60 * 60 * 1000); // 8 hour timeout
             const response = await fetch(`${API_BASE_URL}/tts`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(jsonData)
+                body: JSON.stringify(jsonData),
+                signal: controller.signal
             });
+            clearTimeout(fetchTimeout);
             if (!response.ok) {
                 const errorResult = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }));
                 throw new Error(errorResult.detail || 'TTS generation failed.');
@@ -1174,6 +1197,10 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function proceedWithSubmissionChecks() {
+        if (isBatchMode) {
+            submitBatchRequest();
+            return;
+        }
         const textContent = textArea.value.trim();
         const isSplittingEnabled = splitTextToggle.checked;
         const currentChunkSz = parseInt(chunkSizeSlider.value, 10);
@@ -1540,6 +1567,338 @@ document.addEventListener('DOMContentLoaded', async function () {
                 predefinedVoiceRefreshButton.innerHTML = originalButtonIcon;
             }
         });
+    }
+
+    // --- Batch Mode Logic ---
+
+    const batchSplitBtn = document.getElementById('batch-split-btn');
+    const batchGenerateAllBtn = document.getElementById('batch-generate-all-btn');
+    const batchSectionsContainer = document.getElementById('batch-sections-container');
+    const batchProgressBarContainer = document.getElementById('batch-progress-bar-container');
+    let batchSections = []; // Array of {text: string} after splitting
+    let batchIsGenerating = false;
+    let batchIsRegenerating = false;
+
+    // Toggle batch mode UI
+    if (batchModeToggle) {
+        batchModeToggle.addEventListener('change', () => {
+            isBatchMode = batchModeToggle.checked;
+            if (batchControls) batchControls.classList.toggle('hidden', !isBatchMode);
+            if (generateBtn) generateBtn.classList.toggle('hidden', isBatchMode);
+            // Reset batch state when toggling off
+            if (!isBatchMode) {
+                batchSections = [];
+                if (batchSectionsContainer) batchSectionsContainer.innerHTML = '';
+                if (batchGenerateAllBtn) batchGenerateAllBtn.classList.add('hidden');
+                if (batchDownloadZipBtn) batchDownloadZipBtn.classList.add('hidden');
+                if (batchPlayAllBtn) batchPlayAllBtn.classList.add('hidden');
+                if (batchProgressBarContainer) batchProgressBarContainer.classList.add('hidden');
+                if (batchProgressText) batchProgressText.classList.add('hidden');
+            }
+        });
+    }
+
+    // Split button — split input text into sections by empty lines
+    if (batchSplitBtn) {
+        batchSplitBtn.addEventListener('click', () => {
+            const rawText = textArea ? textArea.value : '';
+            console.log('Split clicked. Text length:', rawText.length, 'Has newlines:', rawText.includes('\n'));
+            if (!rawText.trim()) {
+                showNotification('Please enter text to split.', 'error');
+                return;
+            }
+            // Split on double newlines (one or more blank lines)
+            const parts = rawText.split(/\n\s*\n/).map(s => s.trim()).filter(s => s.length > 0);
+            console.log('Split result:', parts.length, 'sections');
+            if (parts.length === 0) {
+                showNotification('No sections found. Make sure sections are separated by empty lines.', 'error');
+                return;
+            }
+            batchSections = parts.map(text => ({ text }));
+            renderBatchSections();
+            if (batchGenerateAllBtn) batchGenerateAllBtn.classList.remove('hidden');
+            if (batchDownloadZipBtn) batchDownloadZipBtn.classList.add('hidden');
+            showNotification(`Split into ${parts.length} sections.`, 'success');
+        });
+    }
+
+    // Generate All button
+    if (batchGenerateAllBtn) {
+        batchGenerateAllBtn.addEventListener('click', () => {
+            if (batchIsGenerating || batchIsRegenerating) {
+                showNotification('Generation already in progress.', 'warning');
+                return;
+            }
+            submitBatchFromSections();
+        });
+    }
+
+    // Play All button
+    const batchPlayAllBtn = document.getElementById('batch-play-all-btn');
+    if (batchPlayAllBtn) {
+        batchPlayAllBtn.addEventListener('click', () => {
+            // Find the first audio element and play it — sequential chaining handles the rest
+            for (let i = 0; i < batchSections.length; i++) {
+                const audio = document.getElementById(`batch-audio-${i}`);
+                if (audio && audio.src) {
+                    audio.play();
+                    const section = document.getElementById(`batch-section-${i}`);
+                    if (section) section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    break;
+                }
+            }
+        });
+    }
+
+    // Download ZIP button
+    if (batchDownloadZipBtn) {
+        batchDownloadZipBtn.addEventListener('click', () => {
+            if (currentBatchId) {
+                window.location.href = `${API_BASE_URL}/batch/download/${currentBatchId}`;
+            }
+        });
+    }
+
+    function renderBatchSections() {
+        if (!batchSectionsContainer) return;
+        let html = '';
+        for (let i = 0; i < batchSections.length; i++) {
+            const sec = batchSections[i];
+            html += `<div id="batch-section-${i}" style="border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: var(--bg-secondary);">`;
+            html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">`;
+            html += `<span style="font-weight: 600; color: var(--text-secondary);">Section ${i + 1}</span>`;
+            html += `<span id="batch-section-status-${i}" style="font-size: 0.85rem;"></span>`;
+            html += `</div>`;
+            html += `<textarea id="batch-section-text-${i}" rows="4" style="width: 100%; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 0.9rem; resize: vertical; font-family: inherit;">${_escapeHtml(sec.text)}</textarea>`;
+            html += `<div id="batch-section-result-${i}" style="margin-top: 8px;"></div>`;
+            html += `</div>`;
+        }
+        batchSectionsContainer.innerHTML = html;
+    }
+
+    function _escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function _setBatchButtonsEnabled(enabled) {
+        const redoBtns = document.querySelectorAll('.batch-redo-btn');
+        redoBtns.forEach(btn => { btn.disabled = !enabled; btn.style.opacity = enabled ? '1' : '0.4'; });
+    }
+
+    async function submitBatchFromSections() {
+        // Read text from each textarea (user may have edited)
+        for (let i = 0; i < batchSections.length; i++) {
+            const ta = document.getElementById(`batch-section-text-${i}`);
+            if (ta) batchSections[i].text = ta.value;
+        }
+
+        // Build the text with double-newline separators for the backend
+        const combinedText = batchSections.map(s => s.text).join('\n\n');
+        const jsonData = getTTSFormData();
+        jsonData.text = combinedText;
+        jsonData.separator = '\n\n';
+
+        batchIsGenerating = true;
+        _setBatchButtonsEnabled(false);
+        if (batchProgressBarContainer) batchProgressBarContainer.classList.remove('hidden');
+        if (batchProgressText) { batchProgressText.classList.remove('hidden'); batchProgressText.textContent = 'Starting...'; }
+        if (batchProgressBar) batchProgressBar.style.width = '0%';
+
+        // Clear previous results
+        for (let i = 0; i < batchSections.length; i++) {
+            const statusEl = document.getElementById(`batch-section-status-${i}`);
+            const resultEl = document.getElementById(`batch-section-result-${i}`);
+            if (statusEl) statusEl.innerHTML = '<span style="color: var(--text-secondary);">Pending</span>';
+            if (resultEl) resultEl.innerHTML = '';
+        }
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/batch/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(jsonData)
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+                throw new Error(err.detail || 'Batch start failed.');
+            }
+            const result = await response.json();
+            currentBatchId = result.batch_id;
+            showNotification(`Generating ${result.total_chapters} sections...`, 'info');
+
+            if (batchPollInterval) clearInterval(batchPollInterval);
+            batchPollInterval = setInterval(() => pollBatchStatus(), 2000);
+        } catch (error) {
+            console.error('Batch start error:', error);
+            showNotification(error.message || 'Failed to start batch.', 'error');
+            batchIsGenerating = false;
+            _setBatchButtonsEnabled(true);
+        }
+    }
+
+    async function pollBatchStatus() {
+        if (!currentBatchId) return;
+        try {
+            const response = await fetch(`${API_BASE_URL}/batch/status/${currentBatchId}`);
+            if (!response.ok) return;
+            const status = await response.json();
+            updateBatchSectionsFromStatus(status);
+
+            if (['completed', 'partial', 'failed'].includes(status.status)) {
+                clearInterval(batchPollInterval);
+                batchPollInterval = null;
+                batchIsGenerating = false;
+                batchIsRegenerating = false;
+                _setBatchButtonsEnabled(true);
+                if (batchDownloadZipBtn) batchDownloadZipBtn.classList.remove('hidden');
+                if (batchPlayAllBtn) batchPlayAllBtn.classList.remove('hidden');
+                if (status.status === 'completed') {
+                    showNotification('All sections generated!', 'success');
+                } else if (status.status === 'partial') {
+                    showNotification('Generation completed with some failures.', 'warning');
+                } else {
+                    showNotification('Generation failed.', 'error');
+                }
+            }
+        } catch (err) {
+            console.error('Batch poll error:', err);
+        }
+    }
+
+    function updateBatchSectionsFromStatus(status) {
+        // Update progress bar
+        const pct = status.total_chapters > 0
+            ? Math.round((status.completed_chapters / status.total_chapters) * 100) : 0;
+        if (batchProgressBar) batchProgressBar.style.width = `${pct}%`;
+
+        let progressMsg = '';
+        if (status.status === 'generating' && status.current_chapter !== null) {
+            progressMsg = `Generating section ${status.current_chapter + 1} of ${status.total_chapters}...`;
+        } else if (status.status === 'completed') {
+            progressMsg = `All ${status.total_chapters} sections completed.`;
+        } else if (status.status === 'partial') {
+            progressMsg = `${status.completed_chapters} of ${status.total_chapters} sections completed.`;
+        } else if (status.status === 'failed') {
+            progressMsg = `Failed: ${status.error || 'Unknown error'}`;
+        }
+        if (batchProgressText) batchProgressText.textContent = progressMsg;
+
+        // Update each section's status and result
+        for (const ch of status.chapters) {
+            const statusEl = document.getElementById(`batch-section-status-${ch.index}`);
+            const resultEl = document.getElementById(`batch-section-result-${ch.index}`);
+            if (!statusEl || !resultEl) continue;
+
+            if (ch.status === 'completed' && ch.filename) {
+                statusEl.innerHTML = '<span style="color: var(--success, #22c55e); font-weight: 600;">Done</span>';
+                const audioUrl = `${API_BASE_URL}/batch/audio/${status.batch_id}/${ch.filename}?t=${Date.now()}`;
+                const batchDone = ['completed', 'partial', 'failed'].includes(status.status);
+                const disabledAttr = (batchDone && !batchIsRegenerating) ? '' : 'disabled style="opacity:0.4;"';
+                let resultHtml = '';
+                // Only show player after all generation is complete
+                if (batchDone) {
+                    resultHtml += `<audio id="batch-audio-${ch.index}" controls preload="metadata" style="width: 100%; height: 32px; margin-bottom: 6px;" src="${audioUrl}"></audio>`;
+                }
+                resultHtml += `<div style="display: flex; gap: 8px; align-items: center;">
+                        <a href="${audioUrl}" download="${ch.filename}" style="color: var(--accent); font-size: 0.85rem;">Download</a>
+                        <button class="batch-redo-btn" onclick="window._batchRegenerate(${ch.index})" ${disabledAttr}
+                            style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Redo</button>
+                    </div>`;
+                resultEl.innerHTML = resultHtml;
+            } else if (ch.status === 'generating') {
+                statusEl.innerHTML = '<span style="color: var(--accent, #3b82f6);">Generating...</span>';
+                resultEl.innerHTML = '';
+            } else if (ch.status === 'failed') {
+                statusEl.innerHTML = `<span style="color: var(--error, #ef4444);">Failed</span>`;
+                const batchDone = ['completed', 'partial', 'failed'].includes(status.status);
+                const disabledAttr = (batchDone && !batchIsRegenerating) ? '' : 'disabled style="opacity:0.4;"';
+                resultEl.innerHTML = `
+                    <p style="color: var(--error, #ef4444); font-size: 0.8rem; margin-bottom: 4px;">${ch.error || 'Unknown error'}</p>
+                    <button class="batch-redo-btn" onclick="window._batchRegenerate(${ch.index})" ${disabledAttr}
+                        style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Retry</button>`;
+            } else {
+                statusEl.innerHTML = '<span style="color: var(--text-secondary, #888);">Pending</span>';
+                resultEl.innerHTML = '';
+            }
+        }
+
+        // Wire up sequential playback after final render
+        const batchDoneNow = ['completed', 'partial', 'failed'].includes(status.status);
+        if (batchDoneNow) {
+            _wireBatchSequentialPlayback(status.total_chapters);
+        }
+    }
+
+    function _wireBatchSequentialPlayback(totalSections) {
+        for (let i = 0; i < totalSections; i++) {
+            const audio = document.getElementById(`batch-audio-${i}`);
+            if (!audio) continue;
+            // Remove old listener if any (to avoid duplicates from re-renders)
+            audio.onended = null;
+            audio.onended = () => {
+                // Find next available audio and play it
+                for (let next = i + 1; next < totalSections; next++) {
+                    const nextAudio = document.getElementById(`batch-audio-${next}`);
+                    if (nextAudio && nextAudio.src) {
+                        nextAudio.play();
+                        // Scroll the next section into view
+                        const nextSection = document.getElementById(`batch-section-${next}`);
+                        if (nextSection) nextSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        break;
+                    }
+                }
+            };
+        }
+    }
+
+    // Regenerate a single section
+    window._batchRegenerate = async function(chapterIndex) {
+        if (!currentBatchId || batchIsGenerating) return;
+
+        // Read updated text from the textarea
+        const ta = document.getElementById(`batch-section-text-${chapterIndex}`);
+        if (ta) {
+            // Update the section text on the server by sending it
+            batchSections[chapterIndex].text = ta.value;
+        }
+
+        batchIsRegenerating = true;
+        _setBatchButtonsEnabled(false);
+
+        const statusEl = document.getElementById(`batch-section-status-${chapterIndex}`);
+        if (statusEl) statusEl.innerHTML = '<span style="color: var(--accent, #3b82f6);">Regenerating...</span>';
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/batch/regenerate/${currentBatchId}/${chapterIndex}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: ta ? ta.value : null })
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+                throw new Error(err.detail || 'Regeneration failed.');
+            }
+            showNotification(`Regenerating section ${chapterIndex + 1}...`, 'info');
+            if (!batchPollInterval) {
+                batchPollInterval = setInterval(() => pollBatchStatus(), 2000);
+            }
+        } catch (error) {
+            console.error('Regenerate error:', error);
+            showNotification(error.message || 'Failed to regenerate.', 'error');
+            batchIsRegenerating = false;
+            _setBatchButtonsEnabled(true);
+        }
+    };
+
+    function submitBatchRequest() {
+        // Route to the new flow
+        if (batchSections.length > 0) {
+            submitBatchFromSections();
+        } else {
+            showNotification('Please split the text into sections first.', 'error');
+        }
     }
 
     // Call fetchInitialData at the end of setup to kick everything off.

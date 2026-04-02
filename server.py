@@ -15,7 +15,7 @@ import numpy as np
 import librosa  # For potential direct use if needed, though utils.py handles most
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Tuple
 import webbrowser  # For automatic browser opening
 import threading  # For automatic browser opening
 
@@ -62,6 +62,9 @@ from config import (
 import engine  # TTS Engine interface
 from models import (  # Pydantic models
     CustomTTSRequest,
+    BatchTTSRequest,
+    BatchStatusResponse,
+    BatchChapterStatus,
     ErrorResponse,
     UpdateStatusResponse,
 )
@@ -384,6 +387,131 @@ def _remove_dc_offset(
         logger.error(f"DC offset removal failed: {e}")
         return audio.astype(np.float32, copy=False)
 
+
+def _stitch_audio_segments(
+    segments: List[np.ndarray],
+    segment_is_pause: List[bool],
+    sample_rate: int,
+    sentence_pause_ms: int = 300,
+    crossfade_ms: int = 20,
+    safety_fade_ms: int = 3,
+    enable_dc_removal: bool = False,
+    dc_highpass_hz: int = 15,
+) -> np.ndarray:
+    """
+    Stitches multiple audio segments into a single audio array with crossfades
+    and silence insertion. Shared by /tts endpoint and batch worker.
+
+    Args:
+        segments: List of numpy audio arrays.
+        segment_is_pause: List of bools indicating which segments are explicit pauses.
+        sample_rate: Audio sample rate in Hz.
+        sentence_pause_ms: Silence duration between non-pause segments.
+        crossfade_ms: Crossfade duration for smart stitching.
+        safety_fade_ms: Edge fade duration for fallback mode.
+        enable_dc_removal: Whether to apply DC offset removal.
+        dc_highpass_hz: Highpass cutoff for DC removal.
+
+    Returns:
+        Stitched audio as a numpy float32 array.
+    """
+    enable_smart_stitching = config_manager.get_bool(
+        "audio_processing.enable_crossfade", True
+    )
+    peak_normalize_threshold = 0.99
+    peak_normalize_target = 0.95
+
+    if not segments:
+        return np.array([], dtype=np.float32)
+
+    if not sample_rate or sample_rate <= 0:
+        logger.error(f"Invalid sample rate: {sample_rate}, falling back to raw concatenation")
+        return np.concatenate(segments) if len(segments) > 1 else segments[0]
+
+    if len(segments) == 1:
+        final_audio = segments[0]
+        logger.info("Single audio segment - no stitching required")
+
+    elif enable_smart_stitching:
+        fade_samples = int(crossfade_ms / 1000 * sample_rate)
+        desired_silence_samples = int(sentence_pause_ms / 1000 * sample_rate)
+        silence_buffer_samples = desired_silence_samples + (fade_samples * 2)
+
+        # Pad each non-pause segment with a small silence tail so crossfade
+        # doesn't eat into the last word of speech
+        tail_pad_samples = int(0.08 * sample_rate)  # 80ms safety padding
+
+        chunks = []
+        for idx, chunk in enumerate(segments):
+            processed = chunk.astype(np.float32, copy=True)
+            if enable_dc_removal:
+                processed = _remove_dc_offset(processed, sample_rate, dc_highpass_hz)
+            is_pause = segment_is_pause[idx] if idx < len(segment_is_pause) else False
+            if not is_pause and tail_pad_samples > 0:
+                processed = np.concatenate([processed, np.zeros(tail_pad_samples, dtype=np.float32)])
+            chunks.append(processed)
+
+        result = chunks[0]
+        for i in range(1, len(chunks)):
+            prev_is_pause = segment_is_pause[i - 1] if i - 1 < len(segment_is_pause) else False
+            curr_is_pause = segment_is_pause[i] if i < len(segment_is_pause) else False
+
+            if prev_is_pause or curr_is_pause:
+                result = np.concatenate([result, chunks[i]])
+            else:
+                silence = np.zeros(silence_buffer_samples, dtype=np.float32)
+                result = _crossfade_with_overlap(result, silence, fade_samples)
+                result = _crossfade_with_overlap(result, chunks[i], fade_samples)
+
+        final_audio = result
+        logger.info(
+            f"Smart stitching applied: {len(chunks)} chunks, "
+            f"{crossfade_ms}ms crossfades, {sentence_pause_ms}ms pauses"
+        )
+    else:
+        fade_samples = int(safety_fade_ms / 1000 * sample_rate)
+        num_chunks = len(segments)
+        processed_chunks = []
+        for i, chunk in enumerate(segments):
+            processed = _apply_edge_fades(
+                chunk, fade_samples,
+                fade_in=(i != 0),
+                fade_out=(i != num_chunks - 1),
+            )
+            processed_chunks.append(processed)
+        final_audio = np.concatenate(processed_chunks)
+        logger.info(f"Safety edge fades applied: {num_chunks} chunks, {safety_fade_ms}ms fades")
+
+    final_audio = final_audio.astype(np.float32, copy=False)
+
+    # Normalize to prevent clipping
+    peak_amplitude = np.abs(final_audio).max()
+    if peak_amplitude > peak_normalize_threshold:
+        final_audio = final_audio * (peak_normalize_target / peak_amplitude)
+        logger.warning(f"Audio normalized to prevent clipping (peak was {peak_amplitude:.3f})")
+
+    # Global post-processing
+    if config_manager.get_bool("audio_processing.enable_silence_trimming", False):
+        final_audio = utils.trim_lead_trail_silence(final_audio, sample_rate)
+
+    if config_manager.get_bool("audio_processing.enable_internal_silence_fix", False):
+        final_audio = utils.fix_internal_silence(final_audio, sample_rate)
+
+    if (config_manager.get_bool("audio_processing.enable_unvoiced_removal", False)
+            and utils.PARSELMOUTH_AVAILABLE):
+        final_audio = utils.remove_long_unvoiced_segments(final_audio, sample_rate)
+
+    return final_audio
+
+
+# --- Engine Lock & Batch State Management ---
+import threading
+import json
+import zipfile
+
+_engine_lock = threading.Lock()
+_batch_jobs: Dict[str, Dict[str, Any]] = {}
+_batch_jobs_lock = threading.Lock()
 
 # --- End Audio Stitching Helper Functions ---
 
@@ -1062,153 +1190,10 @@ async def custom_tts_endpoint(
             status_code=500, detail="Failed to determine engine sample rate."
         )
     try:
-        # ### SMART AUDIO STITCHING ###
-        # Local constants - adjust these values to tune stitching behavior
-        SENTENCE_PAUSE_MS = 800  # Desired audible silence between sentences
-        CROSSFADE_MS = 20  # Crossfade duration for smart mode (10-50ms recommended)
-        SAFETY_FADE_MS = 3  # Minimal edge fade for fallback mode (2-5ms)
-        ENABLE_DC_REMOVAL = False  # Set True if you hear low-frequency thumps
-        DC_HIGHPASS_HZ = 15  # High-pass cutoff for DC removal
-        PEAK_NORMALIZE_THRESHOLD = 0.99  # Normalize if peak exceeds this
-        PEAK_NORMALIZE_TARGET = 0.95  # Target peak after normalization
-
-        # Read smart stitching toggle from config (defaults to True)
-        enable_smart_stitching = config_manager.get_bool(
-            "audio_processing.enable_crossfade", True
+        final_audio_np = _stitch_audio_segments(
+            all_audio_segments_np, segment_is_pause, engine_output_sample_rate
         )
-
-        # --- Sample rate validation ---
-        if not engine_output_sample_rate or engine_output_sample_rate <= 0:
-            logger.error(
-                f"Invalid sample rate: {engine_output_sample_rate}, "
-                "falling back to raw concatenation"
-            )
-            final_audio_np = (
-                np.concatenate(all_audio_segments_np)
-                if len(all_audio_segments_np) > 1
-                else all_audio_segments_np[0]
-            )
-
-        elif len(all_audio_segments_np) == 1:
-            # Single chunk - no stitching needed
-            final_audio_np = all_audio_segments_np[0]
-            logger.info("Single audio chunk - no stitching required")
-
-        elif enable_smart_stitching:
-            # --- Smart mode: true crossfading with silence insertion ---
-            fade_samples = int(CROSSFADE_MS / 1000 * engine_output_sample_rate)
-
-            # Calculate silence buffer with compensation for crossfade overlap
-            # Each crossfade removes fade_samples from silence (one at each end)
-            desired_silence_samples = int(
-                SENTENCE_PAUSE_MS / 1000 * engine_output_sample_rate
-            )
-            silence_buffer_samples = desired_silence_samples + (fade_samples * 2)
-
-            # Preprocess chunks: convert to float32 and optionally remove DC offset
-            chunks = []
-            for chunk in all_audio_segments_np:
-                processed = chunk.astype(np.float32, copy=True)
-                if ENABLE_DC_REMOVAL:
-                    processed = _remove_dc_offset(
-                        processed, engine_output_sample_rate, DC_HIGHPASS_HZ
-                    )
-                chunks.append(processed)
-
-            # Start with first chunk
-            result = chunks[0]
-
-            # Stitch remaining chunks with crossfaded silence gaps
-            for i in range(1, len(chunks)):
-                # Skip adding extra silence if current or previous segment is an explicit pause
-                prev_is_pause = segment_is_pause[i - 1] if i - 1 < len(segment_is_pause) else False
-                curr_is_pause = segment_is_pause[i] if i < len(segment_is_pause) else False
-
-                if prev_is_pause or curr_is_pause:
-                    # Explicit pause segment — just concatenate directly, no extra silence
-                    result = np.concatenate([result, chunks[i]])
-                else:
-                    # Normal text-to-text transition — add silence gap with crossfade
-                    silence = np.zeros(silence_buffer_samples, dtype=np.float32)
-                    result = _crossfade_with_overlap(result, silence, fade_samples)
-                    result = _crossfade_with_overlap(result, chunks[i], fade_samples)
-
-            final_audio_np = result
-            logger.info(
-                f"Smart stitching applied: {len(chunks)} chunks, "
-                f"{CROSSFADE_MS}ms crossfades, {SENTENCE_PAUSE_MS}ms pauses"
-            )
-
-        else:
-            # --- Fallback mode: minimal safety edge fades, no silence ---
-            fade_samples = int(SAFETY_FADE_MS / 1000 * engine_output_sample_rate)
-            num_chunks = len(all_audio_segments_np)
-
-            processed_chunks = []
-            for i, chunk in enumerate(all_audio_segments_np):
-                is_first = i == 0
-                is_last = i == num_chunks - 1
-
-                processed = _apply_edge_fades(
-                    chunk,
-                    fade_samples,
-                    fade_in=(not is_first),  # No fade-in on first chunk
-                    fade_out=(not is_last),  # No fade-out on last chunk
-                )
-                processed_chunks.append(processed)
-
-            final_audio_np = np.concatenate(processed_chunks)
-            logger.info(
-                f"Safety edge fades applied: {num_chunks} chunks, "
-                f"{SAFETY_FADE_MS}ms linear fades"
-            )
-
-        # --- Ensure float32 dtype for all code paths ---
-        final_audio_np = final_audio_np.astype(np.float32, copy=False)
-
-        # --- Normalize to prevent clipping ---
-        peak_amplitude = np.abs(final_audio_np).max()
-        if peak_amplitude > PEAK_NORMALIZE_THRESHOLD:
-            final_audio_np = final_audio_np * (PEAK_NORMALIZE_TARGET / peak_amplitude)
-            logger.warning(
-                f"Audio normalized to prevent clipping (peak was {peak_amplitude:.3f})"
-            )
-
         perf_monitor.record("Audio chunks stitched")
-
-        # --- Global Audio Post-Processing (applied to complete stitched audio) ---
-        if config_manager.get_bool("audio_processing.enable_silence_trimming", False):
-            final_audio_np = utils.trim_lead_trail_silence(
-                final_audio_np, engine_output_sample_rate
-            )
-            perf_monitor.record("Global silence trim applied")
-
-        if config_manager.get_bool(
-            "audio_processing.enable_internal_silence_fix", False
-        ):
-            final_audio_np = utils.fix_internal_silence(
-                final_audio_np, engine_output_sample_rate
-            )
-            perf_monitor.record("Global internal silence fix applied")
-
-        if (
-            config_manager.get_bool("audio_processing.enable_unvoiced_removal", False)
-            and utils.PARSELMOUTH_AVAILABLE
-        ):
-            final_audio_np = utils.remove_long_unvoiced_segments(
-                final_audio_np, engine_output_sample_rate
-            )
-            perf_monitor.record("Global unvoiced removal applied")
-
-        # --- Warn about potentially conflicting settings ---
-        if enable_smart_stitching and config_manager.get_bool(
-            "audio_processing.enable_silence_trimming", False
-        ):
-            logger.warning(
-                "Smart stitching adds sentence pauses, but silence trimming is enabled. "
-                "Leading/trailing pauses may be removed."
-            )
-        # ### SMART AUDIO STITCHING END ###
 
     except ValueError as e_concat:
         logger.error(f"Audio concatenation/stitching failed: {e_concat}", exc_info=True)
@@ -1397,6 +1382,493 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- Batch/Chapter Generation ---
+
+def _generate_chapter_audio(
+    chapter_text: str,
+    audio_prompt_path: Optional[str],
+    request_params: dict,
+) -> Tuple[np.ndarray, int]:
+    """
+    Generate audio for a single chapter. Uses the same pipeline as /tts.
+    Returns (audio_numpy_array, sample_rate).
+    """
+    # Parse pause tags
+    pause_segments = utils.split_text_on_pause_tags(chapter_text)
+
+    work_items = []
+    for seg in pause_segments:
+        if seg["type"] == "pause":
+            work_items.append(seg)
+        else:
+            seg_text = seg["content"]
+            if request_params.get("split_text", True) and len(seg_text) > (
+                request_params.get("chunk_size", 120) * 1.5
+            ):
+                text_chunks = utils.chunk_text_by_sentences(
+                    seg_text, request_params.get("chunk_size", 120)
+                )
+                for tc in text_chunks:
+                    work_items.append({"type": "text", "content": tc})
+            else:
+                work_items.append({"type": "text", "content": seg_text})
+
+    all_audio_segments = []
+    segment_is_pause = []
+    engine_sr = None
+
+    for item in work_items:
+        if item["type"] == "pause":
+            sr = engine_sr or 24000
+            silence = np.zeros(int(item["duration_ms"] / 1000 * sr), dtype=np.float32)
+            all_audio_segments.append(silence)
+            segment_is_pause.append(True)
+            continue
+
+        chunk = item["content"]
+        if not chunk or not chunk.strip() or all(c in ' \t\n\r\u2014\u2013-.,;:!?\u3000' for c in chunk):
+            continue
+
+        with _engine_lock:
+            audio_data, sr = engine.synthesize(
+                text=chunk,
+                audio_prompt_path=audio_prompt_path,
+                temperature=request_params.get("temperature", get_gen_default_temperature()),
+                exaggeration=request_params.get("exaggeration", get_gen_default_exaggeration()),
+                cfg_weight=request_params.get("cfg_weight", get_gen_default_cfg_weight()),
+                seed=request_params.get("seed", get_gen_default_seed()),
+                language=request_params.get("language", get_gen_default_language()),
+                speaker=request_params.get("qwen3_speaker"),
+                instruct=request_params.get("qwen3_instruct"),
+                ref_text=request_params.get("qwen3_ref_text"),
+            )
+
+        if audio_data is None or sr is None:
+            raise RuntimeError(f"Engine failed to synthesize chunk: {chunk[:50]}...")
+
+        if engine_sr is None:
+            engine_sr = sr
+
+        # Handle speed factor
+        speed = request_params.get("speed_factor", 1.0)
+        if speed and speed != 1.0:
+            if isinstance(audio_data, np.ndarray):
+                audio_data = librosa.effects.time_stretch(
+                    y=audio_data.squeeze().astype(np.float32), rate=speed
+                )
+            else:
+                audio_data, _ = utils.apply_speed_factor(audio_data, sr, speed)
+
+        # Convert to numpy
+        if isinstance(audio_data, np.ndarray):
+            all_audio_segments.append(audio_data.squeeze())
+        else:
+            all_audio_segments.append(audio_data.cpu().numpy().squeeze())
+        segment_is_pause.append(False)
+
+    if not all_audio_segments:
+        raise RuntimeError("No audio segments generated for chapter")
+
+    # Default sample rate if no synthesis occurred (all pauses)
+    if engine_sr is None:
+        engine_sr = 24000
+
+    # Stitch
+    final_audio = _stitch_audio_segments(all_audio_segments, segment_is_pause, engine_sr)
+    return final_audio, engine_sr
+
+
+def _batch_worker(batch_id: str):
+    """Background worker that generates audio for each chapter in a batch."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+        if not job:
+            logger.error(f"Batch {batch_id}: job not found")
+            return
+        job["status"] = "generating"
+
+    output_dir = Path(job["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    request_params = job["request_params"]
+    audio_prompt_path = job.get("audio_prompt_path")
+    output_format = request_params.get("output_format", "wav")
+    completed = 0
+    failed = 0
+
+    for idx, chapter_info in enumerate(job["chapters"]):
+        with _batch_jobs_lock:
+            job["current_chapter"] = idx
+            job["chapters"][idx]["status"] = "generating"
+
+        try:
+            logger.info(f"Batch {batch_id}: Generating chapter {idx + 1}/{len(job['chapters'])}: {chapter_info['title']}")
+
+            audio_np, sr = _generate_chapter_audio(
+                chapter_info["text"],
+                audio_prompt_path,
+                request_params,
+            )
+
+            # Encode
+            target_sr = get_audio_sample_rate()
+            encoded = utils.encode_audio(
+                audio_array=audio_np,
+                sample_rate=sr,
+                output_format=output_format,
+                target_sample_rate=target_sr,
+            )
+
+            if not encoded or len(encoded) < 100:
+                raise RuntimeError("Encoding produced empty or invalid audio")
+
+            # Save to disk
+            filename = f"{idx:03d}.{output_format}"
+            filepath = output_dir / filename
+            with open(filepath, "wb") as f:
+                f.write(encoded)
+
+            with _batch_jobs_lock:
+                job["chapters"][idx]["status"] = "completed"
+                job["chapters"][idx]["filename"] = filename
+                job["chapters"][idx]["download_url"] = f"/outputs/{batch_id}/{filename}"
+                job["completed_chapters"] = job.get("completed_chapters", 0) + 1
+                completed += 1
+
+            logger.info(f"Batch {batch_id}: Chapter {idx + 1} completed: {filename} ({len(encoded)} bytes)")
+
+            # Free memory
+            del audio_np, encoded
+            import gc
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"Batch {batch_id}: Chapter {idx + 1} failed: {e}", exc_info=True)
+            with _batch_jobs_lock:
+                job["chapters"][idx]["status"] = "failed"
+                job["chapters"][idx]["error"] = str(e)
+                failed += 1
+
+    # Write manifest
+    try:
+        manifest = {
+            "batch_id": batch_id,
+            "chapters": [
+                {"index": ch["index"], "title": ch["title"], "status": ch["status"],
+                 "filename": ch.get("filename")}
+                for ch in job["chapters"]
+            ],
+            "output_format": output_format,
+            "total": len(job["chapters"]),
+            "completed": completed,
+            "failed": failed,
+        }
+        with open(output_dir / "batch_manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+    except Exception:
+        pass
+
+    # Set final status
+    with _batch_jobs_lock:
+        job["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        job["current_chapter"] = None
+        if failed == 0:
+            job["status"] = "completed"
+        elif completed == 0:
+            job["status"] = "failed"
+            job["error"] = "All chapters failed to generate"
+        else:
+            job["status"] = "partial"
+
+    logger.info(f"Batch {batch_id}: Finished. {completed} completed, {failed} failed.")
+
+
+@app.post("/batch/start", tags=["Batch Generation"])
+async def batch_start(request: BatchTTSRequest):
+    """Start a batch/chapter TTS generation job."""
+    if not engine.MODEL_LOADED:
+        raise HTTPException(status_code=503, detail="TTS engine model is not loaded.")
+
+    # Split text into chapters
+    chapters = utils.split_text_into_chapters(request.text, request.separator)
+    if not chapters:
+        raise HTTPException(status_code=400, detail="No chapters found in text with the given separator.")
+
+    # Resolve voice path (same validation as /tts)
+    audio_prompt_path = None
+    if request.voice_mode == "predefined" and request.predefined_voice_id:
+        voices_dir = get_predefined_voices_path(ensure_absolute=True)
+        path = voices_dir / request.predefined_voice_id
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"Predefined voice '{request.predefined_voice_id}' not found.")
+        audio_prompt_path = str(path)
+    elif request.voice_mode == "clone" and request.reference_audio_filename:
+        ref_dir = get_reference_audio_path(ensure_absolute=True)
+        path = ref_dir / request.reference_audio_filename
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"Reference audio '{request.reference_audio_filename}' not found.")
+        audio_prompt_path = str(path)
+
+    # Create batch ID and output dir
+    batch_id = f"batch_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    output_dir = get_output_path(ensure_absolute=True) / batch_id
+
+    # Build chapter list
+    chapter_list = []
+    for idx, ch in enumerate(chapters):
+        chapter_list.append({
+            "index": idx,
+            "title": ch["title"],
+            "text": ch["text"],
+            "status": "pending",
+            "filename": None,
+            "download_url": None,
+            "error": None,
+        })
+
+    # Store request params
+    params = {
+        "output_format": request.output_format or "wav",
+        "split_text": request.split_text,
+        "chunk_size": request.chunk_size,
+        "temperature": request.temperature,
+        "exaggeration": request.exaggeration,
+        "cfg_weight": request.cfg_weight,
+        "seed": request.seed,
+        "speed_factor": request.speed_factor,
+        "language": request.language,
+        "qwen3_speaker": request.qwen3_speaker,
+        "qwen3_instruct": request.qwen3_instruct,
+        "qwen3_ref_text": request.qwen3_ref_text,
+    }
+
+    job = {
+        "batch_id": batch_id,
+        "status": "queued",
+        "total_chapters": len(chapter_list),
+        "completed_chapters": 0,
+        "current_chapter": None,
+        "chapters": chapter_list,
+        "output_dir": str(output_dir),
+        "audio_prompt_path": audio_prompt_path,
+        "request_params": params,
+        "error": None,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "completed_at": None,
+    }
+
+    with _batch_jobs_lock:
+        _batch_jobs[batch_id] = job
+
+    # Launch worker thread
+    worker = threading.Thread(target=_batch_worker, args=(batch_id,), daemon=True)
+    worker.start()
+
+    logger.info(f"Batch {batch_id}: Started with {len(chapter_list)} chapters")
+
+    return {
+        "batch_id": batch_id,
+        "total_chapters": len(chapter_list),
+        "status": "queued",
+        "message": f"Batch job started with {len(chapter_list)} chapters.",
+    }
+
+
+@app.get("/batch/status/{batch_id}", response_model=BatchStatusResponse, tags=["Batch Generation"])
+async def batch_status(batch_id: str):
+    """Get the status of a batch generation job."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Batch job '{batch_id}' not found.")
+
+    return BatchStatusResponse(
+        batch_id=job["batch_id"],
+        status=job["status"],
+        total_chapters=job["total_chapters"],
+        completed_chapters=job.get("completed_chapters", 0),
+        current_chapter=job.get("current_chapter"),
+        chapters=[
+            BatchChapterStatus(
+                index=ch["index"],
+                title=ch["title"],
+                status=ch["status"],
+                filename=ch.get("filename"),
+                download_url=ch.get("download_url"),
+                error=ch.get("error"),
+            )
+            for ch in job["chapters"]
+        ],
+        error=job.get("error"),
+        started_at=job.get("started_at"),
+        completed_at=job.get("completed_at"),
+    )
+
+
+@app.get("/batch/download/{batch_id}", tags=["Batch Generation"])
+async def batch_download(batch_id: str):
+    """Download all completed chapters as a ZIP file."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Batch job '{batch_id}' not found.")
+
+    if job["status"] not in ("completed", "partial"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch is still {job['status']}. Wait for completion before downloading."
+        )
+
+    output_dir = Path(job["output_dir"])
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for ch in job["chapters"]:
+            if ch["status"] == "completed" and ch.get("filename"):
+                filepath = output_dir / ch["filename"]
+                if filepath.is_file():
+                    zf.write(filepath, ch["filename"])
+
+    zip_buffer.seek(0)
+    zip_filename = f"{batch_id}.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )
+
+
+@app.get("/batch/audio/{batch_id}/{filename}", tags=["Batch Generation"])
+async def batch_serve_audio(batch_id: str, filename: str):
+    """Serve a batch chapter audio file with proper range request support."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    output_dir = Path(job["output_dir"])
+    filepath = output_dir / filename
+
+    if not filepath.is_file():
+        raise HTTPException(status_code=404, detail="Audio file not found.")
+
+    # FileResponse supports range requests for proper audio streaming
+    ext = filepath.suffix.lstrip('.')
+    media_type = f"audio/{ext}" if ext in ('wav', 'mp3', 'opus') else "application/octet-stream"
+    return FileResponse(filepath, media_type=media_type, filename=filename)
+
+
+class BatchRegenerateRequest(BaseModel):
+    text: Optional[str] = None  # Updated text for the section (optional)
+
+
+@app.post("/batch/regenerate/{batch_id}/{chapter_index}", tags=["Batch Generation"])
+async def batch_regenerate_chapter(batch_id: str, chapter_index: int, body: BatchRegenerateRequest = None):
+    """Regenerate a single chapter in a batch job, optionally with updated text."""
+    if not engine.MODEL_LOADED:
+        raise HTTPException(status_code=503, detail="TTS engine model is not loaded.")
+
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Batch job '{batch_id}' not found.")
+
+    if chapter_index < 0 or chapter_index >= len(job["chapters"]):
+        raise HTTPException(status_code=400, detail=f"Invalid chapter index {chapter_index}.")
+
+    chapter = job["chapters"][chapter_index]
+
+    # Update text if provided
+    if body and body.text is not None:
+        with _batch_jobs_lock:
+            chapter["text"] = body.text
+
+    # Mark as regenerating
+    with _batch_jobs_lock:
+        chapter["status"] = "generating"
+        chapter["error"] = None
+        job["status"] = "generating"
+        job["current_chapter"] = chapter_index
+
+    def _regen_worker():
+        try:
+            output_dir = Path(job["output_dir"])
+            request_params = job["request_params"]
+            audio_prompt_path = job.get("audio_prompt_path")
+            output_format = request_params.get("output_format", "wav")
+
+            logger.info(f"Batch {batch_id}: Regenerating chapter {chapter_index + 1}: {chapter['title']}")
+
+            audio_np, sr = _generate_chapter_audio(
+                chapter["text"],
+                audio_prompt_path,
+                request_params,
+            )
+
+            target_sr = get_audio_sample_rate()
+            encoded = utils.encode_audio(
+                audio_array=audio_np, sample_rate=sr,
+                output_format=output_format, target_sample_rate=target_sr,
+            )
+
+            if not encoded or len(encoded) < 100:
+                raise RuntimeError("Encoding produced empty or invalid audio")
+
+            # Delete old file if exists
+            if chapter.get("filename"):
+                old_path = output_dir / chapter["filename"]
+                if old_path.is_file():
+                    old_path.unlink()
+
+            filename = f"{chapter_index:03d}.{output_format}"
+            filepath = output_dir / filename
+            with open(filepath, "wb") as f:
+                f.write(encoded)
+
+            with _batch_jobs_lock:
+                chapter["status"] = "completed"
+                chapter["filename"] = filename
+                chapter["download_url"] = f"/outputs/{batch_id}/{filename}"
+                chapter["error"] = None
+                job["current_chapter"] = None
+                # Recalculate overall status
+                statuses = [ch["status"] for ch in job["chapters"]]
+                if all(s == "completed" for s in statuses):
+                    job["status"] = "completed"
+                elif any(s == "failed" for s in statuses):
+                    job["status"] = "partial"
+                else:
+                    job["status"] = "completed"
+                job["completed_chapters"] = sum(1 for s in statuses if s == "completed")
+
+            logger.info(f"Batch {batch_id}: Chapter {chapter_index + 1} regenerated: {filename}")
+
+            del audio_np, encoded
+            import gc
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"Batch {batch_id}: Regenerate chapter {chapter_index + 1} failed: {e}", exc_info=True)
+            with _batch_jobs_lock:
+                chapter["status"] = "failed"
+                chapter["error"] = str(e)
+                job["current_chapter"] = None
+                statuses = [ch["status"] for ch in job["chapters"]]
+                if all(s == "failed" for s in statuses):
+                    job["status"] = "failed"
+                else:
+                    job["status"] = "partial"
+
+    worker = threading.Thread(target=_regen_worker, daemon=True)
+    worker.start()
+
+    return {"message": f"Regenerating chapter {chapter_index + 1}: {chapter['title']}"}
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     server_host = get_host()
@@ -1417,4 +1889,5 @@ if __name__ == "__main__":
         log_level="info",
         workers=1,
         reload=False,
+        timeout_keep_alive=600,  # 10 min keep-alive for long generation jobs
     )

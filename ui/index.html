@@ -142,12 +142,30 @@
                                         class="form-checkbox">
                                     <span>Split text into chunks</span>
                                 </label>
+                                <label for="batch-mode-toggle" class="checkbox-label">
+                                    <input type="checkbox" id="batch-mode-toggle" class="form-checkbox">
+                                    <span>Batch/Chapter Mode</span>
+                                </label>
                                 <div id="chunk-size-controls" class="flex-row items-center gap-2 hidden">
                                     <label for="chunk-size-slider" class="form-label small">Chunk Size:</label>
                                     <input type="range" id="chunk-size-slider" name="chunk_size" min="50" max="1000"
                                         step="10" value="120" class="form-slider short">
                                     <span id="chunk-size-value" class="slider-value tabular-nums">120</span>
                                 </div>
+                            </div>
+                            <!-- Batch mode controls -->
+                            <div id="batch-controls" class="mb-6 hidden">
+                                <div class="flex-row gap-4 mb-4">
+                                    <button type="button" id="batch-split-btn" class="btn secondary">Split into Sections</button>
+                                    <button type="button" id="batch-generate-all-btn" class="btn primary hidden">Generate All</button>
+                                    <button type="button" id="batch-play-all-btn" class="btn secondary hidden">Play All</button>
+                                    <button type="button" id="batch-download-zip-btn" class="btn secondary hidden">Download All (ZIP)</button>
+                                </div>
+                                <div id="batch-progress-bar-container" class="hidden" style="background: var(--bg-tertiary); border-radius: 4px; height: 24px; margin-bottom: 12px; overflow: hidden;">
+                                    <div id="batch-progress-bar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s ease; border-radius: 4px;"></div>
+                                </div>
+                                <p id="batch-progress-text" class="form-hint mb-4 hidden"></p>
+                                <div id="batch-sections-container"></div>
                             </div>
                             <p id="chunk-explanation" class="form-hint mb-6 hidden">
                                 Splitting is essential for longer texts like articles or audiobook chapters. Recommended

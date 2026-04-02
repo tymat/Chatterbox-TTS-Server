@@ -212,6 +212,8 @@ VERSION_PATTERN = re.compile(
 )  # Matches version numbers like v1.0.2, 2.3.4
 # Pattern to find potential sentence endings (punctuation followed by quote/space/end of string).
 POTENTIAL_END_PATTERN = re.compile(r'([.!?])(["\']?)(\s+|$)')
+# Pattern for Chinese/CJK sentence-ending punctuation (no whitespace required after)
+CJK_END_PATTERN = re.compile(r'([。！？])([""\u201D\']?)')
 # Pattern to detect start-of-line bullet points or numbered lists.
 BULLET_POINT_PATTERN = re.compile(r"(?:^|\n)\s*([-•*]|\d+\.)\s+")
 # Placeholder for non-verbal cues or special instructions within text (e.g., (laughs), (sighs)).
@@ -885,8 +887,13 @@ def _is_valid_sentence_end(text: str, period_index: int) -> bool:
 def _split_text_by_punctuation(text: str) -> List[str]:
     """
     Splits text into sentences based on common punctuation marks (.!?),
+    including Chinese/CJK punctuation (。！？),
     while trying to avoid splitting on periods used in abbreviations or numbers.
     """
+    # First, check if text contains CJK characters — use CJK-aware splitting
+    if _contains_cjk(text):
+        return _split_cjk_text(text)
+
     sentences: List[str] = []
     last_split_index = 0
     text_length = len(text)
@@ -925,6 +932,57 @@ def _split_text_by_punctuation(text: str) -> List[str]:
     remaining_text_segment = text[last_split_index:].strip()
     if remaining_text_segment:
         sentences.append(remaining_text_segment)
+
+    sentences = [s for s in sentences if s]
+    if not sentences and text.strip():
+        return [text.strip()]
+    return sentences
+
+
+def _contains_cjk(text: str) -> bool:
+    """Check if text contains CJK (Chinese/Japanese/Korean) characters."""
+    for ch in text:
+        cp = ord(ch)
+        if (0x4E00 <= cp <= 0x9FFF or      # CJK Unified Ideographs
+            0x3400 <= cp <= 0x4DBF or      # CJK Extension A
+            0x3040 <= cp <= 0x309F or      # Hiragana
+            0x30A0 <= cp <= 0x30FF or      # Katakana
+            0xAC00 <= cp <= 0xD7AF):       # Hangul
+            return True
+    return False
+
+
+def _split_cjk_text(text: str) -> List[str]:
+    """
+    Split CJK text on sentence-ending punctuation (。！？) and also
+    on standard punctuation (.!?) for mixed-language text.
+    Chinese text doesn't use spaces between sentences, so we split
+    on punctuation characters directly.
+    """
+    sentences: List[str] = []
+    last_split_index = 0
+
+    # Find all CJK sentence endings
+    for match in CJK_END_PATTERN.finditer(text):
+        end_pos = match.end()
+        sentence = text[last_split_index:end_pos].strip()
+        if sentence:
+            sentences.append(sentence)
+        last_split_index = end_pos
+
+    # Also handle any Western punctuation in mixed text
+    remaining = text[last_split_index:]
+    if remaining.strip():
+        # Check for Western sentence endings in the remainder
+        western_parts = POTENTIAL_END_PATTERN.split(remaining)
+        if len(western_parts) > 1:
+            # Has Western punctuation — re-split
+            for part in western_parts:
+                part = part.strip() if part else ""
+                if part:
+                    sentences.append(part)
+        else:
+            sentences.append(remaining.strip())
 
     sentences = [s for s in sentences if s]
     if not sentences and text.strip():
@@ -1080,6 +1138,90 @@ def split_text_on_pause_tags(text: str) -> List[dict]:
         segments.append({"type": "text", "content": text})
 
     return segments
+
+
+# --- Chapter Splitting ---
+CHAPTER_TAG_PATTERN = re.compile(
+    r'\[chapter[:\s]+(.+?)\s*\]',
+    re.IGNORECASE
+)
+
+
+def split_text_into_chapters(text: str, separator: str = "\n\n") -> List[Dict[str, str]]:
+    """
+    Splits text into chapters based on a separator pattern.
+
+    Supported separator modes:
+    - "\\n\\n" (default): Split on double newlines (paragraph breaks)
+    - "---": Split on lines containing only dashes (markdown horizontal rules)
+    - "[chapter:Title]": Split on chapter marker tags, extracting titles
+
+    Args:
+        text: Full text to split into chapters.
+        separator: The separator mode to use.
+
+    Returns:
+        List of dicts: {"title": str, "text": str}
+    """
+    if not text or text.isspace():
+        return []
+
+    chapters = []
+
+    if separator.startswith("[chapter"):
+        # Split on [chapter:Title] markers
+        parts = CHAPTER_TAG_PATTERN.split(text)
+        # parts alternates: [text_before, title1, text1, title2, text2, ...]
+        # First element is text before any chapter marker (preamble)
+        preamble = parts[0].strip()
+        if preamble:
+            chapters.append({"title": "Preamble", "text": preamble})
+
+        for i in range(1, len(parts), 2):
+            title = parts[i].strip() if i < len(parts) else f"Chapter {len(chapters) + 1}"
+            content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            if content:
+                chapters.append({"title": title, "text": content})
+
+    elif separator == "---":
+        # Split on horizontal rules (3+ dashes on their own line)
+        raw_chapters = re.split(r'\n-{3,}\n', text)
+        for idx, chapter_text in enumerate(raw_chapters):
+            chapter_text = chapter_text.strip()
+            if chapter_text:
+                # Try to extract a title from the first line (for display only)
+                lines = chapter_text.split('\n', 1)
+                first_line = lines[0].strip()
+                if len(first_line) < 80 and len(lines) > 1:
+                    title = first_line
+                else:
+                    title = f"Chapter {len(chapters) + 1}"
+                # Always keep full text for synthesis (including the title line)
+                chapters.append({
+                    "title": title,
+                    "text": chapter_text
+                })
+
+    else:
+        # Split on double newlines (default)
+        raw_chapters = re.split(r'\n\s*\n', text)
+        for idx, chapter_text in enumerate(raw_chapters):
+            chapter_text = chapter_text.strip()
+            if chapter_text:
+                # Use first ~50 chars as title
+                preview = chapter_text[:50].replace('\n', ' ')
+                if len(chapter_text) > 50:
+                    preview += "..."
+                chapters.append({
+                    "title": f"Part {len(chapters) + 1}: {preview}",
+                    "text": chapter_text
+                })
+
+    if not chapters and text.strip():
+        chapters.append({"title": "Chapter 1", "text": text.strip()})
+
+    logger.info(f"Split text into {len(chapters)} chapters using separator '{separator}'")
+    return chapters
 
 
 def chunk_text_by_sentences(
