@@ -110,6 +110,7 @@ class BatchTTSRequest(BaseModel):
     """Request model for batch/chapter TTS generation."""
 
     text: str = Field(..., min_length=1, description="Full text to split into chapters.")
+    project_name: Optional[str] = Field(None, description="Project name for the output folder.")
     separator: str = Field(
         "\n\n",
         description="Chapter separator: '\\n\\n' (paragraphs), '---' (horizontal rule), '[chapter:Title]' (markers)."
@@ -157,6 +158,47 @@ class BatchStatusResponse(BaseModel):
     error: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+
+
+class BatchLoadRequest(BaseModel):
+    """Request to load a project from disk."""
+    batch_id: str = Field(..., description="Batch ID to load (e.g., 'batch_20260404_185714_ac0b3627').")
+
+
+class BatchLoadChapter(BaseModel):
+    """Chapter data returned when loading a project (includes text)."""
+    index: int
+    title: str
+    text: str
+    status: str
+    filename: Optional[str] = None
+    download_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class BatchLoadResponse(BaseModel):
+    """Response from loading a project."""
+    batch_id: str
+    status: str
+    total_chapters: int
+    completed_chapters: int
+    chapters: List[BatchLoadChapter] = []
+    voice_config: dict = {}
+    generation_params: dict = {}
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    warnings: List[str] = []
+
+
+class ProjectSummary(BaseModel):
+    """Summary for project listing."""
+    batch_id: str
+    project_name: Optional[str] = None
+    status: str
+    total_chapters: int
+    completed_chapters: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):

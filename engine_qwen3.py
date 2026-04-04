@@ -141,7 +141,7 @@ class Qwen3TTSAdapter:
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             verbose=False,
-            split_pattern="",  # We handle chunking at the server level
+            split_pattern=r"(?<=[.!?])\s+",  # Split on sentence boundaries for reliable generation
         )
 
         # Route based on variant and parameters
@@ -151,8 +151,9 @@ class Qwen3TTSAdapter:
             gen_kwargs["ref_audio"] = audio_prompt_path
             if ref_text:
                 gen_kwargs["ref_text"] = ref_text
-            # ICL mode enforces minimum 1.5 repetition penalty
-            gen_kwargs["repetition_penalty"] = max(repetition_penalty, 1.5)
+            # ICL mode uses slightly elevated repetition penalty to prevent code degeneration
+            # but not too high — 1.5 causes early EOS on long prose
+            gen_kwargs["repetition_penalty"] = max(repetition_penalty, 1.2)
 
         elif speaker and self._model_variant == "custom":
             # Custom voice mode (preset speakers)
@@ -188,6 +189,17 @@ class Qwen3TTSAdapter:
             audio_np = np.array(result.audio)
             audio_segments.append(audio_np)
             sample_rate = result.sample_rate
+            token_count = getattr(result, 'token_count', None)
+            logger.info(
+                f"Qwen3-TTS segment: {len(audio_np)} samples "
+                f"({len(audio_np)/sample_rate:.2f}s), "
+                f"tokens={token_count}, max_tokens={max_tokens}"
+            )
+            if token_count and token_count >= max_tokens - 1:
+                logger.warning(
+                    f"Qwen3-TTS hit max_tokens limit ({token_count}/{max_tokens})! "
+                    f"Audio may be truncated. Consider smaller chunks or higher max_tokens."
+                )
 
         if not audio_segments:
             raise RuntimeError("Qwen3-TTS generated no audio segments")
@@ -197,7 +209,8 @@ class Qwen3TTSAdapter:
 
         logger.info(
             f"Qwen3-TTS generated {len(full_audio)} samples at {sample_rate}Hz "
-            f"({len(full_audio)/sample_rate:.2f}s)"
+            f"({len(full_audio)/sample_rate:.2f}s), "
+            f"text length={len(text)} chars"
         )
 
         return full_audio, sample_rate

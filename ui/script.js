@@ -1614,7 +1614,15 @@ document.addEventListener('DOMContentLoaded', async function () {
                 showNotification('No sections found. Make sure sections are separated by empty lines.', 'error');
                 return;
             }
-            batchSections = parts.map(text => ({ text }));
+            // Append pause tag to each section if a pause value is set
+            const pauseInput = document.getElementById('batch-section-pause');
+            const pauseVal = pauseInput ? parseFloat(pauseInput.value) : 0;
+            batchSections = parts.map(text => {
+                if (pauseVal > 0) {
+                    return { text: text + ` [pause:${pauseVal}s]` };
+                }
+                return { text };
+            });
             renderBatchSections();
             if (batchGenerateAllBtn) batchGenerateAllBtn.classList.remove('hidden');
             if (batchDownloadZipBtn) batchDownloadZipBtn.classList.add('hidden');
@@ -1659,6 +1667,151 @@ document.addEventListener('DOMContentLoaded', async function () {
         });
     }
 
+    // Save Project button
+    const batchSaveBtn = document.getElementById('batch-save-btn');
+    if (batchSaveBtn) {
+        batchSaveBtn.addEventListener('click', async () => {
+            if (!currentBatchId) {
+                showNotification('No active project to save.', 'warning');
+                return;
+            }
+            try {
+                const response = await fetch(`${API_BASE_URL}/batch/save/${currentBatchId}`, { method: 'POST' });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ detail: 'Save failed' }));
+                    throw new Error(err.detail);
+                }
+                showNotification('Project saved.', 'success');
+            } catch (err) {
+                showNotification(err.message || 'Failed to save project.', 'error');
+            }
+        });
+    }
+
+    // Load Project button
+    const batchLoadBtn = document.getElementById('batch-load-btn');
+    const batchLoadPanel = document.getElementById('batch-load-panel');
+    const batchProjectList = document.getElementById('batch-project-list');
+
+    if (batchLoadBtn) {
+        batchLoadBtn.addEventListener('click', async () => {
+            if (batchLoadPanel.classList.contains('hidden')) {
+                batchLoadPanel.classList.remove('hidden');
+                batchProjectList.innerHTML = 'Loading...';
+                try {
+                    const response = await fetch(`${API_BASE_URL}/batch/list_projects`);
+                    const projects = await response.json();
+                    if (projects.length === 0) {
+                        batchProjectList.innerHTML = '<p style="color: var(--text-secondary);">No saved projects found.</p>';
+                        return;
+                    }
+                    let html = '';
+                    for (const p of projects) {
+                        const dateStr = p.updated_at || p.created_at || '';
+                        const statusColor = p.status === 'completed' ? 'var(--success, #22c55e)' :
+                            p.status === 'partial' ? 'var(--warning, #f59e0b)' : 'var(--text-secondary)';
+                        html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border-light, rgba(255,255,255,0.05)); cursor: pointer;" onclick="window._loadProject('${p.batch_id}')">`;
+                        const displayName = p.project_name || p.batch_id;
+                        html += `<div><span style="font-weight: 500;">${displayName}</span><br><span style="font-size: 0.8rem; color: var(--text-secondary);">${p.total_chapters} sections, ${dateStr}</span></div>`;
+                        html += `<span style="color: ${statusColor}; font-size: 0.85rem;">${p.status} (${p.completed_chapters}/${p.total_chapters})</span>`;
+                        html += `</div>`;
+                    }
+                    batchProjectList.innerHTML = html;
+                } catch (err) {
+                    batchProjectList.innerHTML = `<p style="color: var(--error);">Error: ${err.message}</p>`;
+                }
+            } else {
+                batchLoadPanel.classList.add('hidden');
+            }
+        });
+    }
+
+    window._loadProject = async function(batchId) {
+        try {
+            const response = await fetch(`${API_BASE_URL}/batch/load`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ batch_id: batchId })
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+                throw new Error(err.detail || 'Load failed.');
+            }
+            const data = await response.json();
+
+            // Hide load panel
+            if (batchLoadPanel) batchLoadPanel.classList.add('hidden');
+
+            // Restore state
+            currentBatchId = data.batch_id;
+            batchSections = data.chapters.map(ch => ({ text: ch.text }));
+            if (batchSaveBtn) batchSaveBtn.classList.remove('hidden');
+            // Restore project name in the input
+            const projectNameInput = document.getElementById('batch-project-name');
+            if (projectNameInput) projectNameInput.value = data.batch_id;
+
+            // Show batch controls
+            if (batchGenerateAllBtn) batchGenerateAllBtn.classList.remove('hidden');
+
+            // Render sections with text
+            renderBatchSections();
+
+            // Map to status response format and render audio/buttons
+            const statusData = {
+                batch_id: data.batch_id,
+                status: data.status,
+                total_chapters: data.total_chapters,
+                completed_chapters: data.completed_chapters,
+                current_chapter: null,
+                chapters: data.chapters.map(ch => ({
+                    index: ch.index,
+                    title: ch.title,
+                    status: ch.status,
+                    filename: ch.filename,
+                    download_url: ch.download_url,
+                    error: ch.error,
+                })),
+            };
+            updateBatchSectionsFromStatus(statusData);
+
+            // Show action buttons if completed
+            if (['completed', 'partial'].includes(data.status)) {
+                if (batchDownloadZipBtn) batchDownloadZipBtn.classList.remove('hidden');
+                if (batchPlayAllBtn) batchPlayAllBtn.classList.remove('hidden');
+            }
+
+            // Show warnings
+            if (data.warnings && data.warnings.length > 0) {
+                showNotification(data.warnings.join('\n'), 'warning', 10000);
+            }
+
+            showNotification(`Project loaded: ${data.total_chapters} sections.`, 'success');
+        } catch (error) {
+            console.error('Load project error:', error);
+            showNotification(error.message || 'Failed to load project.', 'error');
+        }
+    };
+
+    // Debounced text save for section textareas
+    let _textSaveTimeouts = {};
+    function _debouncedSaveChapterText(chapterIndex) {
+        if (!currentBatchId) return;
+        clearTimeout(_textSaveTimeouts[chapterIndex]);
+        _textSaveTimeouts[chapterIndex] = setTimeout(async () => {
+            const ta = document.getElementById(`batch-section-text-${chapterIndex}`);
+            if (!ta) return;
+            try {
+                await fetch(`${API_BASE_URL}/batch/update_text/${currentBatchId}/${chapterIndex}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: ta.value })
+                });
+            } catch (err) {
+                console.error(`Auto-save failed for section ${chapterIndex}:`, err);
+            }
+        }, 1500);
+    }
+
     function renderBatchSections() {
         if (!batchSectionsContainer) return;
         let html = '';
@@ -1674,6 +1827,14 @@ document.addEventListener('DOMContentLoaded', async function () {
             html += `</div>`;
         }
         batchSectionsContainer.innerHTML = html;
+
+        // Attach debounced auto-save listeners to textareas
+        for (let i = 0; i < batchSections.length; i++) {
+            const ta = document.getElementById(`batch-section-text-${i}`);
+            if (ta) {
+                ta.addEventListener('input', () => _debouncedSaveChapterText(i));
+            }
+        }
     }
 
     function _escapeHtml(str) {
@@ -1699,6 +1860,10 @@ document.addEventListener('DOMContentLoaded', async function () {
         const jsonData = getTTSFormData();
         jsonData.text = combinedText;
         jsonData.separator = '\n\n';
+        const projectNameInput = document.getElementById('batch-project-name');
+        if (projectNameInput && projectNameInput.value.trim()) {
+            jsonData.project_name = projectNameInput.value.trim();
+        }
 
         batchIsGenerating = true;
         _setBatchButtonsEnabled(false);
@@ -1726,6 +1891,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             }
             const result = await response.json();
             currentBatchId = result.batch_id;
+            if (batchSaveBtn) batchSaveBtn.classList.remove('hidden');
             showNotification(`Generating ${result.total_chapters} sections...`, 'info');
 
             if (batchPollInterval) clearInterval(batchPollInterval);

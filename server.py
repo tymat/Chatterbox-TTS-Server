@@ -65,6 +65,10 @@ from models import (  # Pydantic models
     BatchTTSRequest,
     BatchStatusResponse,
     BatchChapterStatus,
+    BatchLoadRequest,
+    BatchLoadResponse,
+    BatchLoadChapter,
+    ProjectSummary,
     ErrorResponse,
     UpdateStatusResponse,
 )
@@ -1193,6 +1197,9 @@ async def custom_tts_endpoint(
         final_audio_np = _stitch_audio_segments(
             all_audio_segments_np, segment_is_pause, engine_output_sample_rate
         )
+        # Append 200ms silence tail to prevent last word cutoff
+        tail_silence = np.zeros(int(0.2 * engine_output_sample_rate), dtype=np.float32)
+        final_audio_np = np.concatenate([final_audio_np, tail_silence])
         perf_monitor.record("Audio chunks stitched")
 
     except ValueError as e_concat:
@@ -1384,6 +1391,52 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
 
 # --- Batch/Chapter Generation ---
 
+def _save_project_file(batch_id: str):
+    """Save the current batch state to project.json atomically."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+        if not job:
+            return
+        # Snapshot the state under lock
+        project = {
+            "version": 1,
+            "batch_id": job["batch_id"],
+            "project_name": job.get("project_name", job["batch_id"]),
+            "created_at": job.get("started_at"),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "status": job["status"],
+            "total_chapters": job["total_chapters"],
+            "completed_chapters": job.get("completed_chapters", 0),
+            "voice_config": job.get("voice_config", {}),
+            "generation_params": job.get("request_params", {}),
+            "chapters": [
+                {
+                    "index": ch["index"],
+                    "title": ch["title"],
+                    "text": ch.get("text", ""),
+                    "status": ch["status"],
+                    "filename": ch.get("filename"),
+                    "error": ch.get("error"),
+                }
+                for ch in job["chapters"]
+            ],
+        }
+
+    output_dir = Path(job["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    project_path = output_dir / "project.json"
+    tmp_path = output_dir / "project.json.tmp"
+
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(project, f, indent=2, ensure_ascii=False)
+        os.replace(str(tmp_path), str(project_path))
+        logger.debug(f"Saved project file: {project_path}")
+    except Exception as e:
+        logger.error(f"Failed to save project file for {batch_id}: {e}")
+        tmp_path.unlink(missing_ok=True)
+
+
 def _generate_chapter_audio(
     chapter_text: str,
     audio_prompt_path: Optional[str],
@@ -1475,6 +1528,11 @@ def _generate_chapter_audio(
 
     # Stitch
     final_audio = _stitch_audio_segments(all_audio_segments, segment_is_pause, engine_sr)
+
+    # Append 200ms silence tail to prevent audio players from cutting off the last word
+    tail_silence = np.zeros(int(0.2 * engine_sr), dtype=np.float32)
+    final_audio = np.concatenate([final_audio, tail_silence])
+
     return final_audio, engine_sr
 
 
@@ -1535,6 +1593,7 @@ def _batch_worker(batch_id: str):
                 completed += 1
 
             logger.info(f"Batch {batch_id}: Chapter {idx + 1} completed: {filename} ({len(encoded)} bytes)")
+            _save_project_file(batch_id)
 
             # Free memory
             del audio_np, encoded
@@ -1547,25 +1606,6 @@ def _batch_worker(batch_id: str):
                 job["chapters"][idx]["status"] = "failed"
                 job["chapters"][idx]["error"] = str(e)
                 failed += 1
-
-    # Write manifest
-    try:
-        manifest = {
-            "batch_id": batch_id,
-            "chapters": [
-                {"index": ch["index"], "title": ch["title"], "status": ch["status"],
-                 "filename": ch.get("filename")}
-                for ch in job["chapters"]
-            ],
-            "output_format": output_format,
-            "total": len(job["chapters"]),
-            "completed": completed,
-            "failed": failed,
-        }
-        with open(output_dir / "batch_manifest.json", "w") as f:
-            json.dump(manifest, f, indent=2)
-    except Exception:
-        pass
 
     # Set final status
     with _batch_jobs_lock:
@@ -1580,6 +1620,7 @@ def _batch_worker(batch_id: str):
             job["status"] = "partial"
 
     logger.info(f"Batch {batch_id}: Finished. {completed} completed, {failed} failed.")
+    _save_project_file(batch_id)
 
 
 @app.post("/batch/start", tags=["Batch Generation"])
@@ -1609,8 +1650,16 @@ async def batch_start(request: BatchTTSRequest):
         audio_prompt_path = str(path)
 
     # Create batch ID and output dir
-    batch_id = f"batch_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    if request.project_name and request.project_name.strip():
+        safe_name = utils.sanitize_filename(request.project_name.strip())
+        batch_id = safe_name
+    else:
+        batch_id = f"batch_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     output_dir = get_output_path(ensure_absolute=True) / batch_id
+    # If directory already exists, append a short suffix to avoid collisions
+    if output_dir.exists():
+        batch_id = f"{batch_id}_{uuid.uuid4().hex[:4]}"
+        output_dir = get_output_path(ensure_absolute=True) / batch_id
 
     # Build chapter list
     chapter_list = []
@@ -1643,6 +1692,7 @@ async def batch_start(request: BatchTTSRequest):
 
     job = {
         "batch_id": batch_id,
+        "project_name": request.project_name or batch_id,
         "status": "queued",
         "total_chapters": len(chapter_list),
         "completed_chapters": 0,
@@ -1650,6 +1700,11 @@ async def batch_start(request: BatchTTSRequest):
         "chapters": chapter_list,
         "output_dir": str(output_dir),
         "audio_prompt_path": audio_prompt_path,
+        "voice_config": {
+            "voice_mode": request.voice_mode,
+            "predefined_voice_id": request.predefined_voice_id,
+            "reference_audio_filename": request.reference_audio_filename,
+        },
         "request_params": params,
         "error": None,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1746,10 +1801,12 @@ async def batch_serve_audio(batch_id: str, filename: str):
     with _batch_jobs_lock:
         job = _batch_jobs.get(batch_id)
 
-    if not job:
-        raise HTTPException(status_code=404, detail="Batch not found.")
+    if job:
+        output_dir = Path(job["output_dir"])
+    else:
+        # Fallback: serve directly from disk even if batch not in memory
+        output_dir = get_output_path(ensure_absolute=True) / batch_id
 
-    output_dir = Path(job["output_dir"])
     filepath = output_dir / filename
 
     if not filepath.is_file():
@@ -1846,6 +1903,7 @@ async def batch_regenerate_chapter(batch_id: str, chapter_index: int, body: Batc
                 job["completed_chapters"] = sum(1 for s in statuses if s == "completed")
 
             logger.info(f"Batch {batch_id}: Chapter {chapter_index + 1} regenerated: {filename}")
+            _save_project_file(batch_id)
 
             del audio_np, encoded
             import gc
@@ -1862,11 +1920,237 @@ async def batch_regenerate_chapter(batch_id: str, chapter_index: int, body: Batc
                     job["status"] = "failed"
                 else:
                     job["status"] = "partial"
+            _save_project_file(batch_id)
 
     worker = threading.Thread(target=_regen_worker, daemon=True)
     worker.start()
 
     return {"message": f"Regenerating chapter {chapter_index + 1}: {chapter['title']}"}
+
+
+@app.get("/batch/list_projects", tags=["Batch Generation"])
+async def batch_list_projects():
+    """List all available projects on disk."""
+    outputs_dir = get_output_path(ensure_absolute=True)
+    projects = []
+
+    if not outputs_dir.is_dir():
+        return projects
+
+    for batch_dir in sorted(outputs_dir.iterdir(), reverse=True):
+        if not batch_dir.is_dir() or not batch_dir.name.startswith("batch_"):
+            continue
+
+        project_path = batch_dir / "project.json"
+        manifest_path = batch_dir / "batch_manifest.json"
+
+        try:
+            if project_path.is_file():
+                with open(project_path, "r") as f:
+                    data = json.load(f)
+                projects.append(ProjectSummary(
+                    batch_id=data.get("batch_id", batch_dir.name),
+                    project_name=data.get("project_name"),
+                    status=data.get("status", "unknown"),
+                    total_chapters=data.get("total_chapters", 0),
+                    completed_chapters=data.get("completed_chapters", 0),
+                    created_at=data.get("created_at"),
+                    updated_at=data.get("updated_at"),
+                ))
+            elif manifest_path.is_file():
+                with open(manifest_path, "r") as f:
+                    data = json.load(f)
+                projects.append(ProjectSummary(
+                    batch_id=data.get("batch_id", batch_dir.name),
+                    status="legacy",
+                    total_chapters=data.get("total", 0),
+                    completed_chapters=data.get("completed", 0),
+                    created_at=None,
+                    updated_at=None,
+                ))
+        except Exception as e:
+            logger.warning(f"Could not read project metadata from {batch_dir.name}: {e}")
+
+    return projects
+
+
+@app.post("/batch/load", tags=["Batch Generation"])
+async def batch_load_project(request: BatchLoadRequest):
+    """Load a project from disk into memory."""
+    batch_id = request.batch_id
+    outputs_dir = get_output_path(ensure_absolute=True)
+    output_dir = outputs_dir / batch_id
+
+    if not output_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Project directory '{batch_id}' not found.")
+
+    # Check if already loaded and generating
+    with _batch_jobs_lock:
+        existing = _batch_jobs.get(batch_id)
+        if existing and existing.get("status") == "generating":
+            raise HTTPException(status_code=409, detail="This batch is currently generating. Cannot reload.")
+
+    warnings = []
+    project_path = output_dir / "project.json"
+    manifest_path = output_dir / "batch_manifest.json"
+
+    if project_path.is_file():
+        try:
+            with open(project_path, "r") as f:
+                project = json.load(f)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Project file is corrupted: {e}")
+    elif manifest_path.is_file():
+        # Legacy fallback
+        try:
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+            project = {
+                "version": 0,
+                "batch_id": manifest.get("batch_id", batch_id),
+                "created_at": None,
+                "updated_at": None,
+                "status": "completed" if manifest.get("failed", 0) == 0 else "partial",
+                "total_chapters": manifest.get("total", 0),
+                "completed_chapters": manifest.get("completed", 0),
+                "voice_config": {},
+                "generation_params": {"output_format": manifest.get("output_format", "wav")},
+                "chapters": [
+                    {
+                        "index": ch.get("index", i),
+                        "title": ch.get("title", f"Chapter {i+1}"),
+                        "text": "",
+                        "status": ch.get("status", "unknown"),
+                        "filename": ch.get("filename"),
+                        "error": None,
+                    }
+                    for i, ch in enumerate(manifest.get("chapters", []))
+                ],
+            }
+            warnings.append("Legacy batch loaded. Chapter texts are not available — re-enter text to use Redo.")
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Manifest file is corrupted: {e}")
+    else:
+        raise HTTPException(status_code=404, detail="No project.json or batch_manifest.json found.")
+
+    # Verify audio files and resolve download URLs
+    chapters = []
+    for ch in project.get("chapters", []):
+        filename = ch.get("filename")
+        file_exists = filename and (output_dir / filename).is_file()
+
+        status = ch.get("status", "unknown")
+        if status == "completed" and not file_exists:
+            status = "missing"
+            warnings.append(f"Chapter {ch['index'] + 1}: audio file '{filename}' missing from disk.")
+
+        chapters.append(BatchLoadChapter(
+            index=ch["index"],
+            title=ch.get("title", f"Chapter {ch['index'] + 1}"),
+            text=ch.get("text", ""),
+            status=status,
+            filename=filename if file_exists else None,
+            download_url=f"/outputs/{batch_id}/{filename}" if file_exists else None,
+            error=ch.get("error"),
+        ))
+
+    # Resolve voice config
+    voice_config = project.get("voice_config", {})
+    audio_prompt_path = None
+    if voice_config.get("voice_mode") == "predefined" and voice_config.get("predefined_voice_id"):
+        vpath = get_predefined_voices_path(ensure_absolute=True) / voice_config["predefined_voice_id"]
+        if vpath.is_file():
+            audio_prompt_path = str(vpath)
+        else:
+            warnings.append(f"Predefined voice '{voice_config['predefined_voice_id']}' not found. Select a voice before regenerating.")
+    elif voice_config.get("voice_mode") == "clone" and voice_config.get("reference_audio_filename"):
+        rpath = get_reference_audio_path(ensure_absolute=True) / voice_config["reference_audio_filename"]
+        if rpath.is_file():
+            audio_prompt_path = str(rpath)
+        else:
+            warnings.append(f"Reference audio '{voice_config['reference_audio_filename']}' not found. Select a voice before regenerating.")
+
+    # Reconstruct job dict and insert into memory
+    job = {
+        "batch_id": batch_id,
+        "status": project.get("status", "completed"),
+        "total_chapters": len(chapters),
+        "completed_chapters": sum(1 for ch in chapters if ch.status == "completed"),
+        "current_chapter": None,
+        "chapters": [
+            {
+                "index": ch.index,
+                "title": ch.title,
+                "text": ch.text,
+                "status": ch.status,
+                "filename": ch.filename,
+                "download_url": ch.download_url,
+                "error": ch.error,
+            }
+            for ch in chapters
+        ],
+        "output_dir": str(output_dir),
+        "audio_prompt_path": audio_prompt_path,
+        "voice_config": voice_config,
+        "request_params": project.get("generation_params", {}),
+        "error": None,
+        "started_at": project.get("created_at"),
+        "completed_at": project.get("updated_at"),
+    }
+
+    with _batch_jobs_lock:
+        _batch_jobs[batch_id] = job
+
+    logger.info(f"Loaded project {batch_id}: {len(chapters)} chapters, {sum(1 for ch in chapters if ch.status == 'completed')} completed")
+
+    return BatchLoadResponse(
+        batch_id=batch_id,
+        status=job["status"],
+        total_chapters=len(chapters),
+        completed_chapters=job["completed_chapters"],
+        chapters=chapters,
+        voice_config=voice_config,
+        generation_params=project.get("generation_params", {}),
+        created_at=project.get("created_at"),
+        updated_at=project.get("updated_at"),
+        warnings=warnings,
+    )
+
+
+class BatchUpdateTextRequest(BaseModel):
+    text: str
+
+
+@app.post("/batch/update_text/{batch_id}/{chapter_index}", tags=["Batch Generation"])
+async def batch_update_text(batch_id: str, chapter_index: int, body: BatchUpdateTextRequest):
+    """Update a chapter's text and save the project."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    if chapter_index < 0 or chapter_index >= len(job["chapters"]):
+        raise HTTPException(status_code=400, detail="Invalid chapter index.")
+
+    with _batch_jobs_lock:
+        job["chapters"][chapter_index]["text"] = body.text
+
+    _save_project_file(batch_id)
+    return {"message": "Text updated and saved."}
+
+
+@app.post("/batch/save/{batch_id}", tags=["Batch Generation"])
+async def batch_save(batch_id: str):
+    """Manually save the current project state to disk."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(batch_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    _save_project_file(batch_id)
+    return {"message": f"Project saved to {job['output_dir']}/project.json"}
 
 
 # --- Main Execution ---
