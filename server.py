@@ -1938,7 +1938,7 @@ async def batch_list_projects():
         return projects
 
     for batch_dir in sorted(outputs_dir.iterdir(), reverse=True):
-        if not batch_dir.is_dir() or not batch_dir.name.startswith("batch_"):
+        if not batch_dir.is_dir():
             continue
 
         project_path = batch_dir / "project.json"
@@ -2140,17 +2140,58 @@ async def batch_update_text(batch_id: str, chapter_index: int, body: BatchUpdate
     return {"message": "Text updated and saved."}
 
 
+class BatchSaveRequest(BaseModel):
+    project_name: Optional[str] = None
+
+
 @app.post("/batch/save/{batch_id}", tags=["Batch Generation"])
-async def batch_save(batch_id: str):
-    """Manually save the current project state to disk."""
+async def batch_save(batch_id: str, body: BatchSaveRequest = None):
+    """Manually save the current project state to disk. Optionally rename the project folder."""
     with _batch_jobs_lock:
         job = _batch_jobs.get(batch_id)
 
     if not job:
         raise HTTPException(status_code=404, detail="Batch not found.")
 
-    _save_project_file(batch_id)
-    return {"message": f"Project saved to {job['output_dir']}/project.json"}
+    new_name = body.project_name if body and body.project_name else None
+
+    if new_name and new_name != batch_id:
+        # Rename the project folder and update all references
+        safe_name = utils.sanitize_filename(new_name)
+        old_dir = Path(job["output_dir"])
+        new_dir = old_dir.parent / safe_name
+
+        if new_dir.exists() and str(new_dir) != str(old_dir):
+            raise HTTPException(status_code=409, detail=f"A project named '{safe_name}' already exists.")
+
+        if str(new_dir) != str(old_dir):
+            try:
+                old_dir.rename(new_dir)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to rename folder: {e}")
+
+            # Update all in-memory references
+            with _batch_jobs_lock:
+                job["output_dir"] = str(new_dir)
+                job["batch_id"] = safe_name
+                job["project_name"] = new_name
+                for ch in job["chapters"]:
+                    if ch.get("download_url"):
+                        ch["download_url"] = ch["download_url"].replace(f"/outputs/{batch_id}/", f"/outputs/{safe_name}/")
+
+                # Re-key in the dict
+                del _batch_jobs[batch_id]
+                _batch_jobs[safe_name] = job
+
+            _save_project_file(safe_name)
+            return {"message": f"Project renamed to '{safe_name}' and saved.", "new_batch_id": safe_name}
+    else:
+        if new_name:
+            with _batch_jobs_lock:
+                job["project_name"] = new_name
+
+        _save_project_file(batch_id)
+        return {"message": f"Project saved."}
 
 
 # --- Main Execution ---

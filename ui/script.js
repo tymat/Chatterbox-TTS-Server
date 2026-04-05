@@ -1676,12 +1676,22 @@ document.addEventListener('DOMContentLoaded', async function () {
                 return;
             }
             try {
-                const response = await fetch(`${API_BASE_URL}/batch/save/${currentBatchId}`, { method: 'POST' });
+                const projectNameInput = document.getElementById('batch-project-name');
+                const projectName = projectNameInput ? projectNameInput.value.trim() : '';
+                const response = await fetch(`${API_BASE_URL}/batch/save/${currentBatchId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ project_name: projectName || null })
+                });
                 if (!response.ok) {
                     const err = await response.json().catch(() => ({ detail: 'Save failed' }));
                     throw new Error(err.detail);
                 }
-                showNotification('Project saved.', 'success');
+                const result = await response.json();
+                if (result.new_batch_id) {
+                    currentBatchId = result.new_batch_id;
+                }
+                showNotification(result.message || 'Project saved.', 'success');
             } catch (err) {
                 showNotification(err.message || 'Failed to save project.', 'error');
             }
@@ -1814,16 +1824,19 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     function renderBatchSections() {
         if (!batchSectionsContainer) return;
-        let html = '';
+        let html = '<div style="margin-bottom: 8px;"><button type="button" id="batch-expand-all-btn" class="btn secondary" style="font-size: 0.8rem; padding: 2px 10px;" onclick="window._batchToggleAll(true)">Expand All</button> <button type="button" id="batch-collapse-all-btn" class="btn secondary" style="font-size: 0.8rem; padding: 2px 10px;" onclick="window._batchToggleAll(false)">Collapse All</button></div>';
         for (let i = 0; i < batchSections.length; i++) {
             const sec = batchSections[i];
-            html += `<div id="batch-section-${i}" style="border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: var(--bg-secondary);">`;
-            html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">`;
-            html += `<span style="font-weight: 600; color: var(--text-secondary);">Section ${i + 1}</span>`;
-            html += `<span id="batch-section-status-${i}" style="font-size: 0.85rem;"></span>`;
+            const preview = sec.text.substring(0, 80).replace(/\n/g, ' ') + (sec.text.length > 80 ? '...' : '');
+            html += `<div id="batch-section-${i}" style="border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--bg-secondary);">`;
+            html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; cursor: pointer; user-select: none;" onclick="window._batchToggleSection(${i})">`;
+            html += `<span><span style="font-weight: 600; color: var(--text-secondary);">Section ${i + 1}</span> <span id="batch-section-preview-${i}" style="color: var(--text-secondary); font-size: 0.8rem; margin-left: 8px;">${_escapeHtml(preview)}</span></span>`;
+            html += `<span style="display: flex; align-items: center; gap: 8px;"><span id="batch-section-status-${i}" style="font-size: 0.85rem;"></span><span id="batch-section-toggle-${i}" style="font-size: 0.7rem; color: var(--text-secondary);">&#9654;</span></span>`;
             html += `</div>`;
+            html += `<div id="batch-section-body-${i}" style="display: none; padding: 0 12px 8px 12px;">`;
             html += `<textarea id="batch-section-text-${i}" rows="4" style="width: 100%; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 0.9rem; resize: vertical; font-family: inherit;">${_escapeHtml(sec.text)}</textarea>`;
-            html += `<div id="batch-section-result-${i}" style="margin-top: 8px;"></div>`;
+            html += `</div>`;
+            html += `<div id="batch-section-result-${i}" style="padding: 0 12px 8px 12px;"></div>`;
             html += `</div>`;
         }
         batchSectionsContainer.innerHTML = html;
@@ -1836,6 +1849,29 @@ document.addEventListener('DOMContentLoaded', async function () {
             }
         }
     }
+
+    window._batchToggleSection = function(index) {
+        const body = document.getElementById(`batch-section-body-${index}`);
+        const toggle = document.getElementById(`batch-section-toggle-${index}`);
+        const preview = document.getElementById(`batch-section-preview-${index}`);
+        if (!body) return;
+        const isHidden = body.style.display === 'none';
+        body.style.display = isHidden ? 'block' : 'none';
+        if (toggle) toggle.innerHTML = isHidden ? '&#9660;' : '&#9654;';
+        if (preview) preview.style.display = isHidden ? 'none' : 'inline';
+    };
+
+    window._batchToggleAll = function(expand) {
+        for (let i = 0; i < batchSections.length; i++) {
+            const body = document.getElementById(`batch-section-body-${i}`);
+            const toggle = document.getElementById(`batch-section-toggle-${i}`);
+            const preview = document.getElementById(`batch-section-preview-${i}`);
+            if (!body) continue;
+            body.style.display = expand ? 'block' : 'none';
+            if (toggle) toggle.innerHTML = expand ? '&#9660;' : '&#9654;';
+            if (preview) preview.style.display = expand ? 'none' : 'inline';
+        }
+    };
 
     function _escapeHtml(str) {
         const div = document.createElement('div');
@@ -1971,6 +2007,8 @@ document.addEventListener('DOMContentLoaded', async function () {
                         <a href="${audioUrl}" download="${ch.filename}" style="color: var(--accent); font-size: 0.85rem;">Download</a>
                         <button class="batch-redo-btn" onclick="window._batchRegenerate(${ch.index})" ${disabledAttr}
                             style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Redo</button>
+                        <button onclick="window._batchReloadAudio(${ch.index}, '${status.batch_id}', '${ch.filename}')"
+                            style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;" title="Force reload audio">Reload</button>
                     </div>`;
                 resultEl.innerHTML = resultHtml;
             } else if (ch.status === 'generating') {
@@ -2018,6 +2056,16 @@ document.addEventListener('DOMContentLoaded', async function () {
             };
         }
     }
+
+    // Force reload audio for a section
+    window._batchReloadAudio = function(chapterIndex, batchId, filename) {
+        const audio = document.getElementById(`batch-audio-${chapterIndex}`);
+        if (audio) {
+            const newUrl = `${API_BASE_URL}/batch/audio/${batchId}/${filename}?t=${Date.now()}`;
+            audio.src = newUrl;
+            audio.load();
+        }
+    };
 
     // Regenerate a single section
     window._batchRegenerate = async function(chapterIndex) {
