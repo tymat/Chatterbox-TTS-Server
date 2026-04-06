@@ -106,6 +106,12 @@ class CustomTTSRequest(BaseModel):
     )
 
 
+class VoiceSample(BaseModel):
+    """A single voice sample for cloning."""
+    audio_filename: str = Field(..., description="Reference audio filename in reference_audio/.")
+    transcript: str = Field("", description="Transcript of what is spoken in the audio.")
+
+
 class BatchTTSRequest(BaseModel):
     """Request model for batch/chapter TTS generation."""
 
@@ -136,6 +142,12 @@ class BatchTTSRequest(BaseModel):
     qwen3_instruct: Optional[str] = Field(None)
     qwen3_ref_text: Optional[str] = Field(None)
 
+    # Multi-sample voice cloning
+    voice_samples: Optional[List[VoiceSample]] = Field(None, description="Multiple voice samples for cloning.")
+    sample_selection_mode: str = Field("random", description="Default: 'random' or sample index ('0', '1', etc).")
+    section_sample_overrides: Optional[List[Optional[int]]] = Field(None, description="Per-section voice sample index overrides. None = use default mode.")
+    section_language_overrides: Optional[List[Optional[str]]] = Field(None, description="Per-section language overrides. None = use default.")
+
 
 class BatchChapterStatus(BaseModel):
     """Status of a single chapter in a batch."""
@@ -145,6 +157,9 @@ class BatchChapterStatus(BaseModel):
     filename: Optional[str] = None
     download_url: Optional[str] = None
     error: Optional[str] = None
+    voice_sample_used: Optional[int] = None
+    voice_sample_override: Optional[int] = None
+    language: Optional[str] = None
 
 
 class BatchStatusResponse(BaseModel):
@@ -174,6 +189,9 @@ class BatchLoadChapter(BaseModel):
     filename: Optional[str] = None
     download_url: Optional[str] = None
     error: Optional[str] = None
+    voice_sample_used: Optional[int] = None
+    voice_sample_override: Optional[int] = None
+    language: Optional[str] = None
 
 
 class BatchLoadResponse(BaseModel):

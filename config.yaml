@@ -31,14 +31,10 @@ audio_output:
   max_reference_duration_sec: 30
   save_to_disk: false
 ui_state:
-  last_text: I am going to watch W W E Monday night Raw [pause:1.2s] you jabronis
-    better recognize that I am the ultimate chatter on Ef-net.  Uhh... [pause:1.2s]
-    CoMbo I'm coming for you buddy.  [pause:1.2s] You will recognize that dabguy is
-    your daddy. [pause:0.8s] Your boy Kongfuzi is going to get punched in the face
-    soon for saying I do chargebacks on sex workers.
+  last_text: "\u56DE\u5149\u8FD4\u7167"
   last_voice_mode: clone
   last_predefined_voice: Emily.wav
-  last_reference_file: Dabguy.wav
+  last_reference_file: ACE2.wav
   last_seed: 1947
   last_chunk_size: 340
   last_split_text_enabled: true

@@ -658,6 +658,8 @@ document.addEventListener('DOMContentLoaded', async function () {
             languageSelectContainer.classList.add('hidden');
         }
         updateSpeedFactorWarning(); // Initial check for speed factor warning
+        renderVoiceSamples(); // Initialize voice samples UI
+        updateBatchVoiceSamplesVisibility(); // Show/hide based on current mode
         const initialGenResult = currentConfig.initial_gen_result;
         if (initialGenResult && initialGenResult.outputUrl) {
             initializeWaveSurfer(initialGenResult.outputUrl, initialGenResult);
@@ -1575,7 +1577,12 @@ document.addEventListener('DOMContentLoaded', async function () {
     const batchGenerateAllBtn = document.getElementById('batch-generate-all-btn');
     const batchSectionsContainer = document.getElementById('batch-sections-container');
     const batchProgressBarContainer = document.getElementById('batch-progress-bar-container');
+    const batchVoiceSamplesPanel = document.getElementById('batch-voice-samples-panel');
+    const batchVoiceSamplesList = document.getElementById('batch-voice-samples-list');
+    const batchAddSampleBtn = document.getElementById('batch-add-sample-btn');
+    const batchSampleModeSelect = document.getElementById('batch-sample-mode');
     let batchSections = []; // Array of {text: string} after splitting
+    let batchVoiceSamples = []; // Array of {audio_filename: string, transcript: string}
     let batchIsGenerating = false;
     let batchIsRegenerating = false;
 
@@ -1585,17 +1592,133 @@ document.addEventListener('DOMContentLoaded', async function () {
             isBatchMode = batchModeToggle.checked;
             if (batchControls) batchControls.classList.toggle('hidden', !isBatchMode);
             if (generateBtn) generateBtn.classList.toggle('hidden', isBatchMode);
+            updateBatchVoiceSamplesVisibility();
             // Reset batch state when toggling off
             if (!isBatchMode) {
                 batchSections = [];
                 if (batchSectionsContainer) batchSectionsContainer.innerHTML = '';
-                if (batchGenerateAllBtn) batchGenerateAllBtn.classList.add('hidden');
-                if (batchDownloadZipBtn) batchDownloadZipBtn.classList.add('hidden');
-                if (batchPlayAllBtn) batchPlayAllBtn.classList.add('hidden');
                 if (batchProgressBarContainer) batchProgressBarContainer.classList.add('hidden');
                 if (batchProgressText) batchProgressText.classList.add('hidden');
             }
         });
+    }
+
+    // Show/hide voice samples panel based on voice mode
+    function updateBatchVoiceSamplesVisibility() {
+        if (batchVoiceSamplesPanel) {
+            const showPanel = isBatchMode && currentVoiceMode === 'clone';
+            batchVoiceSamplesPanel.classList.toggle('hidden', !showPanel);
+        }
+    }
+
+    // Re-check when voice mode radios change
+    document.querySelectorAll('input[name="voice_mode"]').forEach(radio => {
+        radio.addEventListener('change', () => updateBatchVoiceSamplesVisibility());
+    });
+
+    // Voice samples management
+    function renderVoiceSamples() {
+        if (!batchVoiceSamplesList) return;
+        let html = '';
+        for (let i = 0; i < batchVoiceSamples.length; i++) {
+            const s = batchVoiceSamples[i];
+            html += `<div style="display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; padding: 8px; background: var(--bg-primary); border-radius: 4px;">`;
+            html += `<span style="font-weight: 600; color: var(--text-secondary); min-width: 20px; padding-top: 6px;">${i + 1}.</span>`;
+            html += `<div style="flex: 1;">`;
+            html += `<select id="batch-sample-file-${i}" onchange="window._updateVoiceSample(${i})" style="width: 100%; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; margin-bottom: 4px;">`;
+            // Populate from reference files
+            const refFiles = initialReferenceFiles || [];
+            html += `<option value="">-- Select audio --</option>`;
+            for (const f of refFiles) {
+                const selected = f === s.audio_filename ? ' selected' : '';
+                html += `<option value="${f}"${selected}>${f}</option>`;
+            }
+            html += `</select>`;
+            html += `<textarea id="batch-sample-transcript-${i}" rows="2" onchange="window._updateVoiceSample(${i})" placeholder="Transcript of the audio..." style="width: 100%; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; resize: vertical; font-family: inherit;">${_escapeHtml(s.transcript || '')}</textarea>`;
+            html += `</div>`;
+            html += `<button onclick="window._removeVoiceSample(${i})" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--error, #ef4444); padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; margin-top: 4px;">X</button>`;
+            html += `</div>`;
+        }
+        batchVoiceSamplesList.innerHTML = html;
+
+        // Update mode selector options
+        if (batchSampleModeSelect) {
+            const currentMode = batchSampleModeSelect.value;
+            let optHtml = '<option value="random">Random</option>';
+            for (let i = 0; i < batchVoiceSamples.length; i++) {
+                const name = batchVoiceSamples[i].audio_filename || `Sample ${i + 1}`;
+                optHtml += `<option value="${i}">Sample ${i + 1}: ${name}</option>`;
+            }
+            batchSampleModeSelect.innerHTML = optHtml;
+            batchSampleModeSelect.value = currentMode;
+        }
+    }
+
+    window._updateVoiceSample = function(index) {
+        const fileSelect = document.getElementById(`batch-sample-file-${index}`);
+        const transcriptTa = document.getElementById(`batch-sample-transcript-${index}`);
+        if (fileSelect) batchVoiceSamples[index].audio_filename = fileSelect.value;
+        if (transcriptTa) batchVoiceSamples[index].transcript = transcriptTa.value;
+    };
+
+    window._removeVoiceSample = function(index) {
+        batchVoiceSamples.splice(index, 1);
+        renderVoiceSamples();
+    };
+
+    if (batchAddSampleBtn) {
+        batchAddSampleBtn.addEventListener('click', () => {
+            batchVoiceSamples.push({ audio_filename: '', transcript: '' });
+            renderVoiceSamples();
+        });
+    }
+
+    // Upload audio files for voice samples
+    const batchUploadSampleBtn = document.getElementById('batch-upload-sample-btn');
+    const batchSampleFileInput = document.getElementById('batch-sample-file-input');
+
+    if (batchUploadSampleBtn && batchSampleFileInput) {
+        batchUploadSampleBtn.addEventListener('click', () => batchSampleFileInput.click());
+
+        batchSampleFileInput.addEventListener('change', async () => {
+            const files = batchSampleFileInput.files;
+            if (!files || files.length === 0) return;
+
+            const formData = new FormData();
+            for (const file of files) formData.append('files', file);
+
+            try {
+                showNotification(`Uploading ${files.length} file(s)...`, 'info');
+                const response = await fetch(`${API_BASE_URL}/upload_reference`, {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ detail: 'Upload failed' }));
+                    throw new Error(err.detail);
+                }
+                const result = await response.json();
+                // Update the reference files list
+                if (result.all_reference_files) {
+                    initialReferenceFiles = result.all_reference_files;
+                }
+                // Add uploaded files as new voice samples
+                const uploaded = result.uploaded_files || [];
+                for (const fname of uploaded) {
+                    batchVoiceSamples.push({ audio_filename: fname, transcript: '' });
+                }
+                renderVoiceSamples();
+                showNotification(`Uploaded ${uploaded.length} file(s). Set transcripts for each sample.`, 'success');
+            } catch (err) {
+                showNotification(err.message || 'Upload failed.', 'error');
+            }
+            batchSampleFileInput.value = ''; // Reset
+        });
+    }
+
+    // Initialize with one empty sample
+    if (batchVoiceSamples.length === 0) {
+        batchVoiceSamples.push({ audio_filename: '', transcript: '' });
     }
 
     // Split button — split input text into sections by empty lines
@@ -1645,7 +1768,10 @@ document.addEventListener('DOMContentLoaded', async function () {
     const batchPlayAllBtn = document.getElementById('batch-play-all-btn');
     if (batchPlayAllBtn) {
         batchPlayAllBtn.addEventListener('click', () => {
-            // Find the first audio element and play it — sequential chaining handles the rest
+            if (!currentBatchId || batchSections.length === 0) {
+                showNotification('No audio to play. Generate sections first.', 'warning');
+                return;
+            }
             for (let i = 0; i < batchSections.length; i++) {
                 const audio = document.getElementById(`batch-audio-${i}`);
                 if (audio && audio.src) {
@@ -1661,9 +1787,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     // Download ZIP button
     if (batchDownloadZipBtn) {
         batchDownloadZipBtn.addEventListener('click', () => {
-            if (currentBatchId) {
-                window.location.href = `${API_BASE_URL}/batch/download/${currentBatchId}`;
+            if (!currentBatchId) {
+                showNotification('No project to download. Generate sections first.', 'warning');
+                return;
             }
+            window.location.href = `${API_BASE_URL}/batch/download/${currentBatchId}`;
         });
     }
 
@@ -1754,11 +1882,28 @@ document.addEventListener('DOMContentLoaded', async function () {
 
             // Restore state
             currentBatchId = data.batch_id;
-            batchSections = data.chapters.map(ch => ({ text: ch.text }));
-            if (batchSaveBtn) batchSaveBtn.classList.remove('hidden');
+            batchSections = data.chapters.map(ch => ({
+                text: ch.text,
+                voice_sample_override: ch.voice_sample_override !== null && ch.voice_sample_override !== undefined
+                    ? ch.voice_sample_override : undefined,
+                language: ch.language || undefined,
+            }));
             // Restore project name in the input
             const projectNameInput = document.getElementById('batch-project-name');
             if (projectNameInput) projectNameInput.value = data.batch_id;
+
+            // Restore voice samples
+            if (data.voice_config && data.voice_config.voice_samples && data.voice_config.voice_samples.length > 0) {
+                batchVoiceSamples = data.voice_config.voice_samples.map(s => ({
+                    audio_filename: s.audio_filename,
+                    transcript: s.transcript || '',
+                }));
+                renderVoiceSamples();
+                if (batchSampleModeSelect && data.voice_config.sample_selection_mode) {
+                    batchSampleModeSelect.value = data.voice_config.sample_selection_mode;
+                }
+                updateBatchVoiceSamplesVisibility();
+            }
 
             // Show batch controls
             if (batchGenerateAllBtn) batchGenerateAllBtn.classList.remove('hidden');
@@ -1786,8 +1931,6 @@ document.addEventListener('DOMContentLoaded', async function () {
 
             // Show action buttons if completed
             if (['completed', 'partial'].includes(data.status)) {
-                if (batchDownloadZipBtn) batchDownloadZipBtn.classList.remove('hidden');
-                if (batchPlayAllBtn) batchPlayAllBtn.classList.remove('hidden');
             }
 
             // Show warnings
@@ -1834,6 +1977,38 @@ document.addEventListener('DOMContentLoaded', async function () {
             html += `<span style="display: flex; align-items: center; gap: 8px;"><span id="batch-section-status-${i}" style="font-size: 0.85rem;"></span><span id="batch-section-toggle-${i}" style="font-size: 0.7rem; color: var(--text-secondary);">&#9654;</span></span>`;
             html += `</div>`;
             html += `<div id="batch-section-body-${i}" style="display: none; padding: 0 12px 8px 12px;">`;
+            // Per-section voice sample selector and language selector
+            html += `<div style="margin-bottom: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">`;
+            if (batchVoiceSamples.length > 0 && currentVoiceMode === 'clone') {
+                const currentSample = sec.voice_sample_override !== undefined ? sec.voice_sample_override : 'random';
+                html += `<label style="font-size: 0.8rem; color: var(--text-secondary);">Voice:</label>`;
+                html += `<select id="batch-section-sample-${i}" onchange="window._setSectionSample(${i}, this.value)" style="background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 0.8rem;">`;
+                html += `<option value="random"${currentSample === 'random' ? ' selected' : ''}>Random</option>`;
+                for (let s = 0; s < batchVoiceSamples.length; s++) {
+                    const sName = batchVoiceSamples[s].audio_filename || `Sample ${s + 1}`;
+                    html += `<option value="${s}"${currentSample === s || currentSample === String(s) ? ' selected' : ''}>Sample ${s + 1}: ${sName}</option>`;
+                }
+                html += `</select>`;
+            }
+            // Per-section language selector
+            const currentLang = sec.language || 'default';
+            const langOptions = (currentModelInfo && currentModelInfo.supported_languages) ? Object.entries(currentModelInfo.supported_languages) : [];
+            html += `<label style="font-size: 0.8rem; color: var(--text-secondary);">Lang:</label>`;
+            html += `<select id="batch-section-lang-${i}" onchange="window._setSectionLanguage(${i}, this.value)" style="background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 0.8rem;">`;
+            html += `<option value="default"${currentLang === 'default' ? ' selected' : ''}>Default</option>`;
+            if (langOptions.length > 0) {
+                for (const [code, name] of langOptions) {
+                    html += `<option value="${code}"${currentLang === code ? ' selected' : ''}>${name}</option>`;
+                }
+            } else {
+                // Fallback language list
+                const fallbackLangs = [['en','English'],['zh','Chinese'],['ja','Japanese'],['ko','Korean'],['de','German'],['fr','French'],['ru','Russian'],['pt','Portuguese'],['es','Spanish'],['it','Italian']];
+                for (const [code, name] of fallbackLangs) {
+                    html += `<option value="${code}"${currentLang === code ? ' selected' : ''}>${name}</option>`;
+                }
+            }
+            html += `</select>`;
+            html += `</div>`;
             html += `<textarea id="batch-section-text-${i}" rows="4" style="width: 100%; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 0.9rem; resize: vertical; font-family: inherit;">${_escapeHtml(sec.text)}</textarea>`;
             html += `</div>`;
             html += `<div id="batch-section-result-${i}" style="padding: 0 12px 8px 12px;"></div>`;
@@ -1849,6 +2024,18 @@ document.addEventListener('DOMContentLoaded', async function () {
             }
         }
     }
+
+    window._setSectionSample = function(index, value) {
+        if (index < batchSections.length) {
+            batchSections[index].voice_sample_override = value === 'random' ? undefined : parseInt(value);
+        }
+    };
+
+    window._setSectionLanguage = function(index, value) {
+        if (index < batchSections.length) {
+            batchSections[index].language = value === 'default' ? undefined : value;
+        }
+    };
 
     window._batchToggleSection = function(index) {
         const body = document.getElementById(`batch-section-body-${index}`);
@@ -1901,6 +2088,27 @@ document.addEventListener('DOMContentLoaded', async function () {
             jsonData.project_name = projectNameInput.value.trim();
         }
 
+        // Include voice samples if in clone mode
+        const validSamples = batchVoiceSamples.filter(s => s.audio_filename);
+        if (currentVoiceMode === 'clone' && validSamples.length > 0) {
+            jsonData.voice_samples = validSamples;
+            jsonData.sample_selection_mode = batchSampleModeSelect ? batchSampleModeSelect.value : 'random';
+            // Per-section sample overrides
+            const overrides = batchSections.map(s =>
+                s.voice_sample_override !== undefined ? s.voice_sample_override : null
+            );
+            if (overrides.some(v => v !== null)) {
+                jsonData.section_sample_overrides = overrides;
+            }
+        }
+        // Per-section language overrides (always send if any are set)
+        {
+            const langOverrides = batchSections.map(s => s.language || null);
+            if (langOverrides.some(v => v !== null)) {
+                jsonData.section_language_overrides = langOverrides;
+            }
+        }
+
         batchIsGenerating = true;
         _setBatchButtonsEnabled(false);
         if (batchProgressBarContainer) batchProgressBarContainer.classList.remove('hidden');
@@ -1927,7 +2135,6 @@ document.addEventListener('DOMContentLoaded', async function () {
             }
             const result = await response.json();
             currentBatchId = result.batch_id;
-            if (batchSaveBtn) batchSaveBtn.classList.remove('hidden');
             showNotification(`Generating ${result.total_chapters} sections...`, 'info');
 
             if (batchPollInterval) clearInterval(batchPollInterval);
@@ -1954,8 +2161,6 @@ document.addEventListener('DOMContentLoaded', async function () {
                 batchIsGenerating = false;
                 batchIsRegenerating = false;
                 _setBatchButtonsEnabled(true);
-                if (batchDownloadZipBtn) batchDownloadZipBtn.classList.remove('hidden');
-                if (batchPlayAllBtn) batchPlayAllBtn.classList.remove('hidden');
                 if (status.status === 'completed') {
                     showNotification('All sections generated!', 'success');
                 } else if (status.status === 'partial') {
@@ -1994,7 +2199,12 @@ document.addEventListener('DOMContentLoaded', async function () {
             if (!statusEl || !resultEl) continue;
 
             if (ch.status === 'completed' && ch.filename) {
-                statusEl.innerHTML = '<span style="color: var(--success, #22c55e); font-weight: 600;">Done</span>';
+                let sampleLabel = '';
+                if (ch.voice_sample_used !== null && ch.voice_sample_used !== undefined && batchVoiceSamples.length > 1) {
+                    const sName = batchVoiceSamples[ch.voice_sample_used]?.audio_filename || `#${ch.voice_sample_used + 1}`;
+                    sampleLabel = ` <span style="color: var(--text-secondary); font-size: 0.75rem;">(Sample ${ch.voice_sample_used + 1})</span>`;
+                }
+                statusEl.innerHTML = '<span style="color: var(--success, #22c55e); font-weight: 600;">Done</span>' + sampleLabel;
                 const audioUrl = `${API_BASE_URL}/batch/audio/${status.batch_id}/${ch.filename}?t=${Date.now()}`;
                 const batchDone = ['completed', 'partial', 'failed'].includes(status.status);
                 const disabledAttr = (batchDone && !batchIsRegenerating) ? '' : 'disabled style="opacity:0.4;"';

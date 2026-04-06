@@ -159,19 +159,37 @@
                                     <input type="text" id="batch-project-name" placeholder="Project name"
                                         style="width: 200px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.9rem;">
                                     <button type="button" id="batch-split-btn" class="btn secondary">Split into Sections</button>
+                                    <button type="button" id="batch-generate-all-btn" class="btn primary">Generate All</button>
+                                    <button type="button" id="batch-save-btn" class="btn secondary">Save Project</button>
                                     <button type="button" id="batch-load-btn" class="btn secondary">Load Project</button>
-                                    <button type="button" id="batch-save-btn" class="btn secondary hidden">Save Project</button>
-                                    <label class="form-label small" style="margin: 0;">Pause between sections (s):</label>
+                                    <button type="button" id="batch-play-all-btn" class="btn secondary">Play All</button>
+                                    <button type="button" id="batch-download-zip-btn" class="btn secondary">Download All (ZIP)</button>
+                                    <label class="form-label small" style="margin: 0;">Pause (s):</label>
                                     <input type="number" id="batch-section-pause" min="0" max="10" step="0.1" value="0.8"
-                                        style="width: 70px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.9rem;">
-                                    <button type="button" id="batch-generate-all-btn" class="btn primary hidden">Generate All</button>
-                                    <button type="button" id="batch-play-all-btn" class="btn secondary hidden">Play All</button>
-                                    <button type="button" id="batch-download-zip-btn" class="btn secondary hidden">Download All (ZIP)</button>
+                                        style="width: 60px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.85rem;">
                                 </div>
                                 <!-- Project load panel -->
                                 <div id="batch-load-panel" class="hidden" style="border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: var(--bg-secondary); max-height: 250px; overflow-y: auto;">
                                     <p class="form-hint mb-2">Select a project to load:</p>
                                     <div id="batch-project-list">Loading...</div>
+                                </div>
+                                <!-- Voice samples panel (shown when voice_mode is clone) -->
+                                <div id="batch-voice-samples-panel" class="hidden" style="border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: var(--bg-secondary);">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                        <span class="form-label" style="margin: 0;">Voice Samples for Cloning</span>
+                                        <div style="display: flex; gap: 8px; align-items: center;">
+                                            <label class="form-label small" style="margin: 0;">Mode:</label>
+                                            <select id="batch-sample-mode" style="background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 0.85rem;">
+                                                <option value="random">Random</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div id="batch-voice-samples-list"></div>
+                                    <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                        <button type="button" id="batch-add-sample-btn" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">+ Add Sample</button>
+                                        <button type="button" id="batch-upload-sample-btn" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem;">Upload Audio</button>
+                                        <input type="file" id="batch-sample-file-input" accept=".wav,.mp3" multiple style="display: none;">
+                                    </div>
                                 </div>
                                 <div id="batch-progress-bar-container" class="hidden" style="background: var(--bg-tertiary); border-radius: 4px; height: 24px; margin-bottom: 12px; overflow: hidden;">
                                     <div id="batch-progress-bar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s ease; border-radius: 4px;"></div>

@@ -10,6 +10,7 @@ import logging.handlers  # For RotatingFileHandler
 import shutil
 import time
 import uuid
+import random
 import yaml  # For loading presets
 import numpy as np
 import librosa  # For potential direct use if needed, though utils.py handles most
@@ -62,6 +63,7 @@ from config import (
 import engine  # TTS Engine interface
 from models import (  # Pydantic models
     CustomTTSRequest,
+    VoiceSample,
     BatchTTSRequest,
     BatchStatusResponse,
     BatchChapterStatus,
@@ -1417,6 +1419,9 @@ def _save_project_file(batch_id: str):
                     "status": ch["status"],
                     "filename": ch.get("filename"),
                     "error": ch.get("error"),
+                    "voice_sample_used": ch.get("voice_sample_used"),
+                    "voice_sample_override": ch.get("voice_sample_override"),
+                    "language": ch.get("language"),
                 }
                 for ch in job["chapters"]
             ],
@@ -1549,6 +1554,8 @@ def _batch_worker(batch_id: str):
     output_dir.mkdir(parents=True, exist_ok=True)
     request_params = job["request_params"]
     audio_prompt_path = job.get("audio_prompt_path")
+    voice_samples = job.get("resolved_voice_samples", [])
+    selection_mode = job.get("voice_config", {}).get("sample_selection_mode", "random")
     output_format = request_params.get("output_format", "wav")
     completed = 0
     failed = 0
@@ -1559,12 +1566,42 @@ def _batch_worker(batch_id: str):
             job["chapters"][idx]["status"] = "generating"
 
         try:
+            # Select voice sample for this chapter
+            chapter_audio_path = audio_prompt_path
+            chapter_params = dict(request_params)
+            sample_used = None
+
+            if voice_samples and len(voice_samples) > 0:
+                # Check per-section override first
+                section_override = chapter_info.get("voice_sample_override")
+                if section_override is not None:
+                    sample_idx = min(int(section_override), len(voice_samples) - 1)
+                elif selection_mode == "random":
+                    sample_idx = random.randint(0, len(voice_samples) - 1)
+                else:
+                    try:
+                        sample_idx = int(selection_mode)
+                    except (ValueError, TypeError):
+                        sample_idx = 0
+                    sample_idx = min(sample_idx, len(voice_samples) - 1)
+
+                selected = voice_samples[sample_idx]
+                chapter_audio_path = selected["audio_path"]
+                chapter_params["qwen3_ref_text"] = selected["transcript"]
+                sample_used = sample_idx
+                logger.info(f"Batch {batch_id}: Chapter {idx + 1} using voice sample {sample_idx + 1}: {selected['audio_filename']}")
+
+            # Per-section language override
+            section_lang = chapter_info.get("language")
+            if section_lang:
+                chapter_params["language"] = section_lang
+
             logger.info(f"Batch {batch_id}: Generating chapter {idx + 1}/{len(job['chapters'])}: {chapter_info['title']}")
 
             audio_np, sr = _generate_chapter_audio(
                 chapter_info["text"],
-                audio_prompt_path,
-                request_params,
+                chapter_audio_path,
+                chapter_params,
             )
 
             # Encode
@@ -1589,6 +1626,7 @@ def _batch_worker(batch_id: str):
                 job["chapters"][idx]["status"] = "completed"
                 job["chapters"][idx]["filename"] = filename
                 job["chapters"][idx]["download_url"] = f"/outputs/{batch_id}/{filename}"
+                job["chapters"][idx]["voice_sample_used"] = sample_used
                 job["completed_chapters"] = job.get("completed_chapters", 0) + 1
                 completed += 1
 
@@ -1634,20 +1672,46 @@ async def batch_start(request: BatchTTSRequest):
     if not chapters:
         raise HTTPException(status_code=400, detail="No chapters found in text with the given separator.")
 
-    # Resolve voice path (same validation as /tts)
+    # Resolve voice path(s)
     audio_prompt_path = None
+    resolved_voice_samples = []
+
     if request.voice_mode == "predefined" and request.predefined_voice_id:
         voices_dir = get_predefined_voices_path(ensure_absolute=True)
         path = voices_dir / request.predefined_voice_id
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"Predefined voice '{request.predefined_voice_id}' not found.")
         audio_prompt_path = str(path)
-    elif request.voice_mode == "clone" and request.reference_audio_filename:
-        ref_dir = get_reference_audio_path(ensure_absolute=True)
-        path = ref_dir / request.reference_audio_filename
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail=f"Reference audio '{request.reference_audio_filename}' not found.")
-        audio_prompt_path = str(path)
+
+    elif request.voice_mode == "clone":
+        # Multi-sample voice cloning
+        if request.voice_samples and len(request.voice_samples) > 0:
+            ref_dir = get_reference_audio_path(ensure_absolute=True)
+            for i, sample in enumerate(request.voice_samples):
+                spath = ref_dir / sample.audio_filename
+                if not spath.is_file():
+                    raise HTTPException(status_code=404, detail=f"Voice sample {i+1}: '{sample.audio_filename}' not found.")
+                resolved_voice_samples.append({
+                    "audio_filename": sample.audio_filename,
+                    "audio_path": str(spath),
+                    "transcript": sample.transcript,
+                })
+            # Set default audio_prompt_path to first sample (used for single-sample fallback)
+            audio_prompt_path = resolved_voice_samples[0]["audio_path"]
+            logger.info(f"Multi-sample voice cloning: {len(resolved_voice_samples)} samples configured")
+
+        elif request.reference_audio_filename:
+            # Single sample fallback
+            ref_dir = get_reference_audio_path(ensure_absolute=True)
+            path = ref_dir / request.reference_audio_filename
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail=f"Reference audio '{request.reference_audio_filename}' not found.")
+            audio_prompt_path = str(path)
+            resolved_voice_samples = [{
+                "audio_filename": request.reference_audio_filename,
+                "audio_path": str(path),
+                "transcript": request.qwen3_ref_text or "",
+            }]
 
     # Create batch ID and output dir
     if request.project_name and request.project_name.strip():
@@ -1662,8 +1726,12 @@ async def batch_start(request: BatchTTSRequest):
         output_dir = get_output_path(ensure_absolute=True) / batch_id
 
     # Build chapter list
+    section_overrides = request.section_sample_overrides or []
+    section_lang_overrides = request.section_language_overrides or []
     chapter_list = []
     for idx, ch in enumerate(chapters):
+        override = section_overrides[idx] if idx < len(section_overrides) else None
+        lang_override = section_lang_overrides[idx] if idx < len(section_lang_overrides) else None
         chapter_list.append({
             "index": idx,
             "title": ch["title"],
@@ -1672,6 +1740,9 @@ async def batch_start(request: BatchTTSRequest):
             "filename": None,
             "download_url": None,
             "error": None,
+            "voice_sample_override": override,
+            "voice_sample_used": None,
+            "language": lang_override,
         })
 
     # Store request params
@@ -1704,7 +1775,13 @@ async def batch_start(request: BatchTTSRequest):
             "voice_mode": request.voice_mode,
             "predefined_voice_id": request.predefined_voice_id,
             "reference_audio_filename": request.reference_audio_filename,
+            "voice_samples": [
+                {"audio_filename": s["audio_filename"], "transcript": s["transcript"]}
+                for s in resolved_voice_samples
+            ],
+            "sample_selection_mode": request.sample_selection_mode,
         },
+        "resolved_voice_samples": resolved_voice_samples,
         "request_params": params,
         "error": None,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1751,6 +1828,9 @@ async def batch_status(batch_id: str):
                 filename=ch.get("filename"),
                 download_url=ch.get("download_url"),
                 error=ch.get("error"),
+                voice_sample_used=ch.get("voice_sample_used"),
+                voice_sample_override=ch.get("voice_sample_override"),
+                language=ch.get("language"),
             )
             for ch in job["chapters"]
         ],
@@ -1820,6 +1900,7 @@ async def batch_serve_audio(batch_id: str, filename: str):
 
 class BatchRegenerateRequest(BaseModel):
     text: Optional[str] = None  # Updated text for the section (optional)
+    voice_sample_index: Optional[int] = None  # Override voice sample for this section
 
 
 @app.post("/batch/regenerate/{batch_id}/{chapter_index}", tags=["Batch Generation"])
@@ -1851,12 +1932,36 @@ async def batch_regenerate_chapter(batch_id: str, chapter_index: int, body: Batc
         job["status"] = "generating"
         job["current_chapter"] = chapter_index
 
+    # Determine voice sample for regeneration
+    regen_sample_index = body.voice_sample_index if body and body.voice_sample_index is not None else None
+
     def _regen_worker():
         try:
             output_dir = Path(job["output_dir"])
-            request_params = job["request_params"]
+            request_params = dict(job["request_params"])
             audio_prompt_path = job.get("audio_prompt_path")
+            voice_samples = job.get("resolved_voice_samples", [])
+            selection_mode = job.get("voice_config", {}).get("sample_selection_mode", "random")
             output_format = request_params.get("output_format", "wav")
+
+            # Select voice sample
+            sample_used = None
+            if voice_samples and len(voice_samples) > 0:
+                if regen_sample_index is not None:
+                    sample_idx = min(regen_sample_index, len(voice_samples) - 1)
+                elif selection_mode == "random":
+                    sample_idx = random.randint(0, len(voice_samples) - 1)
+                else:
+                    try:
+                        sample_idx = int(selection_mode)
+                    except (ValueError, TypeError):
+                        sample_idx = 0
+                    sample_idx = min(sample_idx, len(voice_samples) - 1)
+
+                selected = voice_samples[sample_idx]
+                audio_prompt_path = selected["audio_path"]
+                request_params["qwen3_ref_text"] = selected["transcript"]
+                sample_used = sample_idx
 
             logger.info(f"Batch {batch_id}: Regenerating chapter {chapter_index + 1}: {chapter['title']}")
 
@@ -1890,6 +1995,7 @@ async def batch_regenerate_chapter(batch_id: str, chapter_index: int, body: Batc
                 chapter["status"] = "completed"
                 chapter["filename"] = filename
                 chapter["download_url"] = f"/outputs/{batch_id}/{filename}"
+                chapter["voice_sample_used"] = sample_used
                 chapter["error"] = None
                 job["current_chapter"] = None
                 # Recalculate overall status
@@ -2052,23 +2158,53 @@ async def batch_load_project(request: BatchLoadRequest):
             filename=filename if file_exists else None,
             download_url=f"/outputs/{batch_id}/{filename}" if file_exists else None,
             error=ch.get("error"),
+            voice_sample_used=ch.get("voice_sample_used"),
+            voice_sample_override=ch.get("voice_sample_override"),
+            language=ch.get("language"),
         ))
 
-    # Resolve voice config
+    # Resolve voice config and voice samples
     voice_config = project.get("voice_config", {})
     audio_prompt_path = None
+    resolved_voice_samples = []
+
     if voice_config.get("voice_mode") == "predefined" and voice_config.get("predefined_voice_id"):
         vpath = get_predefined_voices_path(ensure_absolute=True) / voice_config["predefined_voice_id"]
         if vpath.is_file():
             audio_prompt_path = str(vpath)
         else:
-            warnings.append(f"Predefined voice '{voice_config['predefined_voice_id']}' not found. Select a voice before regenerating.")
-    elif voice_config.get("voice_mode") == "clone" and voice_config.get("reference_audio_filename"):
-        rpath = get_reference_audio_path(ensure_absolute=True) / voice_config["reference_audio_filename"]
-        if rpath.is_file():
-            audio_prompt_path = str(rpath)
-        else:
-            warnings.append(f"Reference audio '{voice_config['reference_audio_filename']}' not found. Select a voice before regenerating.")
+            warnings.append(f"Predefined voice '{voice_config['predefined_voice_id']}' not found.")
+
+    elif voice_config.get("voice_mode") == "clone":
+        # Resolve multi-sample voice cloning
+        saved_samples = voice_config.get("voice_samples", [])
+        if saved_samples:
+            ref_dir = get_reference_audio_path(ensure_absolute=True)
+            for i, s in enumerate(saved_samples):
+                spath = ref_dir / s["audio_filename"]
+                if spath.is_file():
+                    resolved_voice_samples.append({
+                        "audio_filename": s["audio_filename"],
+                        "audio_path": str(spath),
+                        "transcript": s.get("transcript", ""),
+                    })
+                else:
+                    warnings.append(f"Voice sample {i+1}: '{s['audio_filename']}' not found.")
+            if resolved_voice_samples:
+                audio_prompt_path = resolved_voice_samples[0]["audio_path"]
+
+        # Fallback: single sample from old format
+        elif voice_config.get("reference_audio_filename"):
+            rpath = get_reference_audio_path(ensure_absolute=True) / voice_config["reference_audio_filename"]
+            if rpath.is_file():
+                audio_prompt_path = str(rpath)
+                resolved_voice_samples = [{
+                    "audio_filename": voice_config["reference_audio_filename"],
+                    "audio_path": str(rpath),
+                    "transcript": project.get("generation_params", {}).get("qwen3_ref_text", ""),
+                }]
+            else:
+                warnings.append(f"Reference audio '{voice_config['reference_audio_filename']}' not found.")
 
     # Reconstruct job dict and insert into memory
     job = {
@@ -2086,11 +2222,15 @@ async def batch_load_project(request: BatchLoadRequest):
                 "filename": ch.filename,
                 "download_url": ch.download_url,
                 "error": ch.error,
+                "voice_sample_used": ch.voice_sample_used,
+                "voice_sample_override": ch.voice_sample_override,
+                "language": ch.language,
             }
             for ch in chapters
         ],
         "output_dir": str(output_dir),
         "audio_prompt_path": audio_prompt_path,
+        "resolved_voice_samples": resolved_voice_samples,
         "voice_config": voice_config,
         "request_params": project.get("generation_params", {}),
         "error": None,
